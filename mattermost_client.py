@@ -17,13 +17,19 @@ class MattermostClient:
     def connect(self):
         """Подключение к Mattermost"""
         try:
+            # Определяем схему и порт из URL
+            from urllib.parse import urlparse
+            parsed_url = urlparse(config.MATTERMOST_URL)
+            scheme = parsed_url.scheme or 'https'
+            port = parsed_url.port or (443 if scheme == 'https' else 80)
+            
             self.driver = Driver({
                 'url': config.MATTERMOST_URL,
                 'token': config.MATTERMOST_TOKEN,
-                'scheme': 'https',
-                'port': 443,
+                'scheme': scheme,
+                'port': port,
                 'basepath': '/api/v4',
-                'verify': True,
+                'verify': config.MATTERMOST_SSL_VERIFY,
                 'timeout': 30,
             })
             
