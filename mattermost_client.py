@@ -22,9 +22,10 @@ class MattermostClient:
             parsed_url = urlparse(config.MATTERMOST_URL)
             scheme = parsed_url.scheme or 'https'
             port = parsed_url.port or (443 if scheme == 'https' else 80)
+            hostname = parsed_url.hostname or parsed_url.netloc
             
             self.driver = Driver({
-                'url': config.MATTERMOST_URL,
+                'url': hostname,
                 'token': config.MATTERMOST_TOKEN,
                 'scheme': scheme,
                 'port': port,
