@@ -1,0 +1,28 @@
+[Unit]
+Description=Standup Bot для проверки планов в Jira
+After=network.target
+
+[Service]
+Type=simple
+User=standup-bot
+Group=standup-bot
+WorkingDirectory=/opt/standup-bot
+Environment=PATH=/opt/standup-bot/venv/bin
+ExecStart=/opt/standup-bot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=standup-bot
+
+# Безопасность
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/standup-bot
+
+[Install]
+WantedBy=multi-user.target

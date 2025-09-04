@@ -1,0 +1,10 @@
+mattermostdriver>=7.3.2
+requests>=2.31.0
+schedule>=1.2.0
+sqlite3
+python-dotenv>=1.0.0
+jira>=3.5.0
+asyncio
+aiohttp>=3.8.0
+logging
+datetime
