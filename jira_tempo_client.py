@@ -74,51 +74,13 @@ class JiraTempoClient:
         Возвращает (has_worklog, total_hours)
         """
         try:
-            # Проверяем, используется ли Tempo Cloud API или on-premise
+            # Проверяем, используется ли Tempo Cloud API или встроенный в Jira
             if config.TEMPO_API_URL.startswith('https://api.tempo.io'):
                 # Tempo Cloud API
-                url = f"{config.TEMPO_API_URL}/worklogs"
-                params = {
-                    'from': date,
-                    'to': date,
-                    'worker': account_id
-                }
-                
-                response = requests.get(url, headers=self.tempo_headers, params=params)
-                response.raise_for_status()
-                
-                data = response.json()
-                worklogs = data.get('results', [])
+                return self._get_worklog_tempo_cloud(account_id, date)
             else:
-                # Tempo on-premise API (может отличаться)
-                # Для on-premise Tempo API может быть другая структура URL
-                url = f"{config.TEMPO_API_URL}/worklogs/user/{account_id}"
-                params = {
-                    'from': date,
-                    'to': date
-                }
-                
-                # Для on-premise может потребоваться другая аутентификация
-                headers = self.tempo_headers.copy()
-                if hasattr(config, 'TEMPO_VERIFY_SSL') and not config.TEMPO_VERIFY_SSL:
-                    response = requests.get(url, headers=headers, params=params, verify=False)
-                else:
-                    response = requests.get(url, headers=headers, params=params)
-                    
-                response.raise_for_status()
-                
-                data = response.json()
-                # Структура ответа может отличаться для on-premise
-                worklogs = data if isinstance(data, list) else data.get('results', data.get('worklogs', []))
-            
-            if not worklogs:
-                return False, 0.0
-            
-            # Подсчитываем общее количество часов
-            total_seconds = sum(worklog.get('timeSpentSeconds', 0) for worklog in worklogs)
-            total_hours = total_seconds / 3600.0  # Переводим в часы
-            
-            return True, total_hours
+                # Встроенный Tempo в Jira - пробуем разные варианты API
+                return self._get_worklog_tempo_onpremise(account_id, date)
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Ошибка запроса к Tempo API для пользователя {account_id}: {e}")
@@ -127,6 +89,114 @@ class JiraTempoClient:
         except Exception as e:
             logger.error(f"Ошибка получения worklog для пользователя {account_id}: {e}")
             return False, 0.0
+    
+    def _get_worklog_tempo_cloud(self, account_id: str, date: str) -> Tuple[bool, float]:
+        """Получить worklog через Tempo Cloud API"""
+        url = f"{config.TEMPO_API_URL}/worklogs"
+        params = {
+            'from': date,
+            'to': date,
+            'worker': account_id
+        }
+        
+        response = requests.get(url, headers=self.tempo_headers, params=params)
+        response.raise_for_status()
+        
+        data = response.json()
+        worklogs = data.get('results', [])
+        
+        if not worklogs:
+            return False, 0.0
+        
+        total_seconds = sum(worklog.get('timeSpentSeconds', 0) for worklog in worklogs)
+        total_hours = total_seconds / 3600.0
+        
+        return True, total_hours
+    
+    def _get_worklog_tempo_onpremise(self, account_id: str, date: str) -> Tuple[bool, float]:
+        """Получить worklog через встроенный Tempo API в Jira"""
+        # Список возможных URL паттернов для встроенного Tempo
+        api_patterns = [
+            f"{config.TEMPO_API_URL}/worklogs/user/{account_id}",
+            f"{config.TEMPO_API_URL}/worklogs",
+            f"{config.TEMPO_API_URL}/worklog/user/{account_id}",
+            f"{config.TEMPO_API_URL}/worklog",
+        ]
+        
+        params = {
+            'from': date,
+            'to': date,
+            'dateFrom': date,
+            'dateTo': date,
+            'user': account_id,
+            'worker': account_id
+        }
+        
+        # Для встроенного Tempo может потребоваться аутентификация Jira
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Basic {self._get_jira_auth_header()}'
+        }
+        
+        # Если есть Tempo токен, добавляем его
+        if config.TEMPO_API_TOKEN:
+            headers['Authorization'] = f'Bearer {config.TEMPO_API_TOKEN}'
+        
+        for url_pattern in api_patterns:
+            try:
+                logger.debug(f"Пробуем Tempo API URL: {url_pattern}")
+                
+                if hasattr(config, 'TEMPO_VERIFY_SSL') and not config.TEMPO_VERIFY_SSL:
+                    response = requests.get(url_pattern, headers=headers, params=params, verify=False)
+                else:
+                    response = requests.get(url_pattern, headers=headers, params=params)
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                # Разные структуры ответа для разных версий
+                worklogs = []
+                if isinstance(data, list):
+                    worklogs = data
+                elif 'results' in data:
+                    worklogs = data['results']
+                elif 'worklogs' in data:
+                    worklogs = data['worklogs']
+                elif 'worklog' in data:
+                    worklogs = data['worklog'] if isinstance(data['worklog'], list) else [data['worklog']]
+                
+                if worklogs:
+                    total_seconds = sum(
+                        worklog.get('timeSpentSeconds', 0) or 
+                        worklog.get('timeSpent', 0) or 
+                        (worklog.get('hours', 0) * 3600)
+                        for worklog in worklogs
+                    )
+                    total_hours = total_seconds / 3600.0
+                    
+                    logger.info(f"Успешно получен worklog через {url_pattern}: {total_hours:.2f} часов")
+                    return True, total_hours
+                
+            except requests.exceptions.RequestException as e:
+                logger.debug(f"Ошибка для URL {url_pattern}: {e}")
+                continue
+            except Exception as e:
+                logger.debug(f"Ошибка обработки ответа для {url_pattern}: {e}")
+                continue
+        
+        logger.warning(f"Не удалось получить worklog через Tempo API, используем fallback")
+        return self._get_worklog_via_jira(account_id, date)
+    
+    def _get_jira_auth_header(self) -> str:
+        """Получить заголовок аутентификации для Jira"""
+        import base64
+        
+        if config.JIRA_AUTH_METHOD.lower() == 'token':
+            auth_string = f"{config.JIRA_USERNAME}:{config.JIRA_API_TOKEN}"
+        else:
+            auth_string = f"{config.JIRA_USERNAME}:{config.JIRA_PASSWORD}"
+        
+        return base64.b64encode(auth_string.encode()).decode()
     
     def _get_worklog_via_jira(self, user_id: str, date: str) -> Tuple[bool, float]:
         """
