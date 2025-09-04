@@ -10,8 +10,7 @@ class Config:
     # Mattermost настройки
     MATTERMOST_URL = os.getenv('MATTERMOST_URL', 'https://your-mattermost-server.com')
     MATTERMOST_TOKEN = os.getenv('MATTERMOST_TOKEN')
-    MATTERMOST_BOT_USERNAME = os.getenv('MATTERMOST_BOT_USERNAME', 'standup-bot')
-    MATTERMOST_USERNAME = os.getenv('MATTERMOST_USERNAME', MATTERMOST_BOT_USERNAME)  # Альтернативное имя
+    MATTERMOST_USERNAME = os.getenv('MATTERMOST_USERNAME', 'standup-bot')
     MATTERMOST_TEAM = os.getenv('MATTERMOST_TEAM')  # Команда в Mattermost
     MATTERMOST_CHANNEL_ID = os.getenv('MATTERMOST_CHANNEL_ID')  # ID канала для отчетов
     MATTERMOST_SSL_VERIFY = os.getenv('MATTERMOST_SSL_VERIFY', 'true').lower() == 'true'
