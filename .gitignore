@@ -79,3 +79,4 @@ Thumbs.db
 
 #tests
 test_connections.py
+test_user_jira.py

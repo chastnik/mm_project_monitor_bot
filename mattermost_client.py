@@ -157,6 +157,52 @@ class MattermostClient:
 
 Спасибо! 🙏"""
     
+    def format_plans_reminder_message(self, user_name: str = None) -> str:
+        """Форматировать напоминание о планах для пользователя"""
+        greeting = f"Привет, {user_name}!" if user_name else "Привет!"
+        
+        return f"""{greeting}
+
+📋 **Напоминание о планировании работ**
+
+У вас пока нет запланированных задач на сегодня в Jira.
+
+Пожалуйста:
+• Проверьте свои задачи в Jira
+• Установите **Remaining Estimate** для задач, над которыми планируете работать
+• Это поможет команде видеть вашу загрузку и планы
+
+Спасибо за внимание к планированию! 📊"""
+    
+    def format_plans_report_message(self, users_with_plans: List[str], users_without_plans: List[str]) -> str:
+        """Форматировать сообщение с отчетом о планах"""
+        message_parts = []
+        
+        message_parts.append("📊 **Отчет о планировании работ в Jira**")
+        message_parts.append(f"Дата: {self._get_current_date()}")
+        message_parts.append("")
+        
+        if users_with_plans:
+            message_parts.append("✅ **Есть планы на сегодня:**")
+            for user in users_with_plans:
+                message_parts.append(f"• {user}")
+            message_parts.append("")
+        
+        if users_without_plans:
+            message_parts.append("❌ **Нет запланированных задач:**")
+            for user in users_without_plans:
+                message_parts.append(f"• {user}")
+            message_parts.append("")
+            message_parts.append("Им отправлены напоминания о планировании.")
+        
+        if not users_with_plans and not users_without_plans:
+            message_parts.append("ℹ️ Нет данных для отображения")
+        
+        message_parts.append("")
+        message_parts.append("💡 *Планы определяются по полю Remaining Estimate в задачах Jira*")
+        
+        return "\n".join(message_parts)
+    
     def _get_current_date(self) -> str:
         """Получить текущую дату в читаемом формате"""
         from datetime import datetime

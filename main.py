@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Основной файл бота для проверки заполнения планов в Jira через Tempo
+Основной файл бота для мониторинга проектов в Jira - 
+отслеживание превышения трудозатрат и просроченных сроков
 """
 import logging
 import sys
@@ -11,7 +12,7 @@ from mattermostdriver import Driver
 from config import config
 from database import db_manager
 from mattermost_client import mattermost_client
-from jira_tempo_client import jira_tempo_client
+from jira_client import jira_client
 from scheduler import scheduler
 from bot_commands import command_handler
 
@@ -43,7 +44,7 @@ class StandupBot:
         
     def start(self):
         """Запуск бота"""
-        self.logger.info("🚀 Запуск бота для проверки планов...")
+        self.logger.info("🚀 Запуск бота для мониторинга проектов...")
         
         try:
             # Проверяем конфигурацию
@@ -138,16 +139,11 @@ class StandupBot:
         
         # Тест Jira
         try:
-            current_user = jira_tempo_client.jira_client.current_user()
+            current_user = jira_client.jira_client.current_user()
             self.logger.info(f"✅ Jira: подключен как {current_user}")
         except Exception as e:
             raise Exception(f"Ошибка подключения к Jira: {e}")
         
-        # Тест Tempo API
-        if not jira_tempo_client.test_tempo_connection():
-            raise Exception("Ошибка подключения к Tempo API")
-        
-        self.logger.info("✅ Tempo API: подключение успешно")
         
         # Тест канала
         channel_info = mattermost_client.get_channel_info(config.MATTERMOST_CHANNEL_ID)
@@ -192,7 +188,10 @@ class StandupBot:
                     
                     # Обрабатываем только личные сообщения или упоминания бота
                     if channel_type == 'D' or f'@{mattermost_client.driver.users.get_user("me")["username"]}' in message_text:
-                        response = command_handler.handle_message(message_text, user_email, channel_type)
+                        response = command_handler.handle_message(
+                            message_text, user_email, channel_type, 
+                            channel_id, team_id, user_id
+                        )
                         
                         if response:
                             if channel_type == 'D':
@@ -208,13 +207,17 @@ class StandupBot:
     def _send_startup_message(self):
         """Отправить сообщение о запуске бота"""
         try:
-            startup_message = f"""🤖 **Бот проверки планов запущен!**
+            startup_message = f"""🤖 **Бот мониторинга проектов запущен!**
 
 📅 **Расписание:** ежедневно в {config.CHECK_TIME}
-👥 **Отслеживаемых пользователей:** {len(db_manager.get_active_users())}
+🔍 **Активных подписок:** {len(db_manager.get_active_subscriptions())}
 ⚙️ **Версия:** {datetime.now().strftime('%Y.%m.%d')}
 
-Для получения справки напишите боту `help` в личных сообщениях."""
+🚨 **Мониторинг:**
+• Превышение трудозатрат (факт > план)
+• Просроченные сроки выполнения
+
+Используйте `subscribe PROJECT_KEY` для подписки на мониторинг проекта!"""
             
             mattermost_client.send_channel_message(config.MATTERMOST_CHANNEL_ID, startup_message)
             

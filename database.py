@@ -3,6 +3,8 @@
 """
 import sqlite3
 import logging
+import re
+import hashlib
 from typing import List, Optional, Tuple
 from config import config
 
@@ -19,38 +21,85 @@ class DatabaseManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                # Таблица пользователей для мониторинга
+                # Таблица настроек подключения к Jira для пользователей
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS monitored_users (
+                    CREATE TABLE IF NOT EXISTS user_jira_settings (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        email TEXT UNIQUE NOT NULL,
-                        name TEXT,
-                        mattermost_user_id TEXT,
-                        jira_account_id TEXT,
-                        active BOOLEAN DEFAULT 1,
+                        user_email TEXT UNIQUE NOT NULL,
+                        user_id TEXT NOT NULL,
+                        jira_username TEXT NOT NULL,
+                        jira_password TEXT NOT NULL,
+                        last_test_success BOOLEAN DEFAULT 0,
+                        last_test_at TIMESTAMP,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
                 
-                # Таблица для истории проверок
+                # Таблица подписок на проекты
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS check_history (
+                    CREATE TABLE IF NOT EXISTS project_subscriptions (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        check_date DATE NOT NULL,
-                        user_email TEXT NOT NULL,
-                        has_worklog BOOLEAN NOT NULL,
-                        worklog_hours REAL DEFAULT 0,
-                        notified BOOLEAN DEFAULT 0,
+                        project_key TEXT NOT NULL,
+                        project_name TEXT,
+                        mattermost_channel_id TEXT NOT NULL,
+                        mattermost_team_id TEXT,
+                        subscribed_by_user_id TEXT NOT NULL,
+                        subscribed_by_email TEXT,
+                        active BOOLEAN DEFAULT 1,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (user_email) REFERENCES monitored_users (email)
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(project_key, mattermost_channel_id)
+                    )
+                ''')
+                
+                # Таблица для истории уведомлений
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS notification_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_key TEXT NOT NULL,
+                        issue_key TEXT NOT NULL,
+                        notification_type TEXT NOT NULL, -- 'time_exceeded' или 'deadline_overdue'
+                        assignee_email TEXT,
+                        assignee_name TEXT,
+                        channel_id TEXT NOT NULL,
+                        issue_summary TEXT,
+                        planned_hours REAL DEFAULT 0,
+                        actual_hours REAL DEFAULT 0,
+                        due_date DATE,
+                        notification_date DATE NOT NULL,
+                        sent_to_channel BOOLEAN DEFAULT 0,
+                        sent_to_assignee BOOLEAN DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(issue_key, notification_type, notification_date)
+                    )
+                ''')
+                
+                # Таблица для кеширования информации о задачах
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS issue_cache (
+                        issue_key TEXT PRIMARY KEY,
+                        project_key TEXT NOT NULL,
+                        summary TEXT,
+                        assignee_email TEXT,
+                        assignee_name TEXT,
+                        status TEXT,
+                        due_date DATE,
+                        original_estimate REAL DEFAULT 0,
+                        time_spent REAL DEFAULT 0,
+                        remaining_estimate REAL DEFAULT 0,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
                 
                 # Индексы для оптимизации
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_email ON monitored_users(email)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_check_date ON check_history(check_date)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_check ON check_history(user_email, check_date)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_email ON user_jira_settings(user_email)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_project_key ON project_subscriptions(project_key)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_channel_id ON project_subscriptions(mattermost_channel_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_notification_date ON notification_history(notification_date)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_issue_project ON issue_cache(project_key)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_issue_assignee ON issue_cache(assignee_email)')
                 
                 conn.commit()
                 logger.info("База данных инициализирована успешно")
@@ -59,57 +108,206 @@ class DatabaseManager:
             logger.error(f"Ошибка инициализации базы данных: {e}")
             raise
     
-    def add_user(self, email: str, name: str = None, mattermost_user_id: str = None, jira_account_id: str = None) -> bool:
-        """Добавить пользователя в список мониторинга"""
+    def _validate_email(self, email: str) -> bool:
+        """Валидация email адреса"""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email.strip()) is not None
+    
+    def _sanitize_input(self, text: str, max_length: int = 255) -> str:
+        """Очистка и ограничение длины входных данных"""
+        if not text:
+            return ""
+        return text.strip()[:max_length]
+    
+    def save_user_jira_settings(self, user_email: str, user_id: str, jira_username: str, jira_password: str) -> bool:
+        """Сохранить настройки подключения к Jira для пользователя"""
+        # Валидация входных данных
+        if not self._validate_email(user_email):
+            logger.error(f"Некорректный email: {user_email}")
+            return False
+        
+        user_email = self._sanitize_input(user_email.lower())
+        user_id = self._sanitize_input(user_id)
+        jira_username = self._sanitize_input(jira_username)
+        
+        # Проверка на пустые обязательные поля
+        if not all([user_email, user_id, jira_username, jira_password]):
+            logger.error("Пустые обязательные поля при сохранении настроек Jira")
+            return False
+        
+        # Ограничение длины пароля
+        if len(jira_password) > 500:
+            logger.error("Пароль слишком длинный")
+            return False
+        
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO monitored_users (email, name, mattermost_user_id, jira_account_id)
-                    VALUES (?, ?, ?, ?)
-                ''', (email, name, mattermost_user_id, jira_account_id))
+                    INSERT OR REPLACE INTO user_jira_settings 
+                    (user_email, user_id, jira_username, jira_password, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (user_email, user_id, jira_username, jira_password))
                 conn.commit()
-                logger.info(f"Пользователь {email} добавлен в мониторинг")
+                logger.info(f"Настройки Jira сохранены для пользователя {user_email}")
                 return True
-        except sqlite3.IntegrityError:
-            logger.warning(f"Пользователь {email} уже существует в базе")
-            return False
         except Exception as e:
-            logger.error(f"Ошибка добавления пользователя {email}: {e}")
+            logger.error(f"Ошибка сохранения настроек Jira для {user_email}: {e}")
             return False
     
-    def remove_user(self, email: str) -> bool:
-        """Удалить пользователя из списка мониторинга"""
+    def get_user_jira_settings(self, user_email: str) -> Optional[Tuple[str, str, str, str]]:
+        """Получить настройки подключения к Jira для пользователя"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute('UPDATE monitored_users SET active = 0 WHERE email = ?', (email,))
+                cursor.execute('''
+                    SELECT user_id, jira_username, jira_password, last_test_success
+                    FROM user_jira_settings 
+                    WHERE user_email = ?
+                ''', (user_email,))
+                result = cursor.fetchone()
+                return result if result else None
+        except Exception as e:
+            logger.error(f"Ошибка получения настроек Jira для {user_email}: {e}")
+            return None
+    
+    def update_jira_test_result(self, user_email: str, success: bool) -> bool:
+        """Обновить результат тестирования подключения к Jira"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE user_jira_settings 
+                    SET last_test_success = ?, last_test_at = CURRENT_TIMESTAMP
+                    WHERE user_email = ?
+                ''', (success, user_email))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка обновления результата теста для {user_email}: {e}")
+            return False
+    
+    def delete_user_jira_settings(self, user_email: str) -> bool:
+        """Удалить настройки Jira пользователя"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM user_jira_settings WHERE user_email = ?', (user_email,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logger.info(f"Настройки Jira удалены для пользователя {user_email}")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка удаления настроек Jira для {user_email}: {e}")
+            return False
+    
+    def subscribe_to_project(self, project_key: str, project_name: str, channel_id: str, 
+                           team_id: str, user_id: str, user_email: str) -> bool:
+        """Подписать канал на мониторинг проекта"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO project_subscriptions 
+                    (project_key, project_name, mattermost_channel_id, mattermost_team_id, 
+                     subscribed_by_user_id, subscribed_by_email, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (project_key, project_name, channel_id, team_id, user_id, user_email))
+                conn.commit()
+                logger.info(f"Канал {channel_id} подписан на проект {project_key}")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка подписки на проект {project_key}: {e}")
+            return False
+    
+    def unsubscribe_from_project(self, project_key: str, channel_id: str) -> bool:
+        """Отписать канал от мониторинга проекта"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE project_subscriptions 
+                    SET active = 0, updated_at = CURRENT_TIMESTAMP 
+                    WHERE project_key = ? AND mattermost_channel_id = ?
+                ''', (project_key, channel_id))
                 if cursor.rowcount > 0:
                     conn.commit()
-                    logger.info(f"Пользователь {email} деактивирован")
+                    logger.info(f"Канал {channel_id} отписан от проекта {project_key}")
                     return True
                 else:
-                    logger.warning(f"Пользователь {email} не найден")
+                    logger.warning(f"Подписка на проект {project_key} в канале {channel_id} не найдена")
                     return False
         except Exception as e:
-            logger.error(f"Ошибка удаления пользователя {email}: {e}")
+            logger.error(f"Ошибка отписки от проекта {project_key}: {e}")
             return False
     
-    def get_active_users(self) -> List[Tuple]:
-        """Получить список активных пользователей"""
+    def get_active_subscriptions(self) -> List[Tuple]:
+        """Получить список активных подписок на проекты"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT email, name, mattermost_user_id, jira_account_id
-                    FROM monitored_users 
+                    SELECT project_key, project_name, mattermost_channel_id, 
+                           mattermost_team_id, subscribed_by_email
+                    FROM project_subscriptions 
                     WHERE active = 1
-                    ORDER BY email
+                    ORDER BY project_key
                 ''')
                 return cursor.fetchall()
         except Exception as e:
-            logger.error(f"Ошибка получения списка пользователей: {e}")
+            logger.error(f"Ошибка получения списка подписок: {e}")
             return []
+    
+    def get_subscriptions_by_channel(self, channel_id: str) -> List[Tuple]:
+        """Получить подписки для конкретного канала"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT project_key, project_name, subscribed_by_email, created_at
+                    FROM project_subscriptions 
+                    WHERE mattermost_channel_id = ? AND active = 1
+                    ORDER BY created_at DESC
+                ''', (channel_id,))
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения подписок для канала {channel_id}: {e}")
+            return []
+    
+    def get_all_subscriptions(self) -> List[Tuple]:
+        """Получить все подписки (для администраторов)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT project_key, project_name, mattermost_channel_id, 
+                           subscribed_by_email, created_at, active
+                    FROM project_subscriptions 
+                    ORDER BY created_at DESC
+                ''')
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения всех подписок: {e}")
+            return []
+    
+    def delete_subscription_by_id(self, project_key: str, channel_id: str) -> bool:
+        """Удалить конкретную подписку (для администраторов)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM project_subscriptions 
+                    WHERE project_key = ? AND mattermost_channel_id = ?
+                ''', (project_key, channel_id))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logger.info(f"Подписка {project_key} в канале {channel_id} удалена")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка удаления подписки {project_key}/{channel_id}: {e}")
+            return False
     
     def update_user_ids(self, email: str, mattermost_user_id: str = None, jira_account_id: str = None) -> bool:
         """Обновить ID пользователя в Mattermost и Jira"""
@@ -141,20 +339,46 @@ class DatabaseManager:
             logger.error(f"Ошибка обновления пользователя {email}: {e}")
             return False
     
-    def save_check_result(self, user_email: str, check_date: str, has_worklog: bool, worklog_hours: float = 0) -> bool:
-        """Сохранить результат проверки"""
+    def save_notification(self, project_key: str, issue_key: str, notification_type: str,
+                         assignee_email: str, assignee_name: str, channel_id: str,
+                         issue_summary: str, planned_hours: float, actual_hours: float,
+                         due_date: str = None) -> bool:
+        """Сохранить информацию об отправленном уведомлении"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT OR REPLACE INTO check_history 
-                    (user_email, check_date, has_worklog, worklog_hours)
-                    VALUES (?, ?, ?, ?)
-                ''', (user_email, check_date, has_worklog, worklog_hours))
+                    INSERT OR REPLACE INTO notification_history 
+                    (project_key, issue_key, notification_type, assignee_email, assignee_name,
+                     channel_id, issue_summary, planned_hours, actual_hours, due_date, notification_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE('now'))
+                ''', (project_key, issue_key, notification_type, assignee_email, assignee_name,
+                      channel_id, issue_summary, planned_hours, actual_hours, due_date))
                 conn.commit()
                 return True
         except Exception as e:
-            logger.error(f"Ошибка сохранения результата проверки для {user_email}: {e}")
+            logger.error(f"Ошибка сохранения уведомления для {issue_key}: {e}")
+            return False
+    
+    def update_issue_cache(self, issue_key: str, project_key: str, summary: str,
+                          assignee_email: str, assignee_name: str, status: str,
+                          due_date: str, original_estimate: float, time_spent: float,
+                          remaining_estimate: float) -> bool:
+        """Обновить кеш информации о задаче"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO issue_cache 
+                    (issue_key, project_key, summary, assignee_email, assignee_name, status,
+                     due_date, original_estimate, time_spent, remaining_estimate, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (issue_key, project_key, summary, assignee_email, assignee_name, status,
+                      due_date, original_estimate, time_spent, remaining_estimate))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления кеша для задачи {issue_key}: {e}")
             return False
     
     def get_check_history(self, days: int = 7) -> List[Tuple]:

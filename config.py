@@ -23,10 +23,6 @@ class Config:
     JIRA_AUTH_METHOD = os.getenv('JIRA_AUTH_METHOD', 'password')  # 'token' или 'password'
     JIRA_VERIFY_SSL = os.getenv('JIRA_VERIFY_SSL', 'true').lower() == 'true'
     
-    # Tempo API настройки
-    TEMPO_API_TOKEN = os.getenv('TEMPO_API_TOKEN')
-    TEMPO_API_URL = os.getenv('TEMPO_API_URL', 'https://api.tempo.io/core/3')  # Или ваш on-premise URL
-    TEMPO_VERIFY_SSL = os.getenv('TEMPO_VERIFY_SSL', 'true').lower() == 'true'
     
     # База данных
     DATABASE_PATH = os.getenv('DATABASE_PATH', 'standup_bot.db')
