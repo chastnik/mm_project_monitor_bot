@@ -7,6 +7,7 @@ import re
 import hashlib
 from typing import List, Optional, Tuple
 from config import config
+from crypto_utils import password_crypto
 
 logger = logging.getLogger(__name__)
 
@@ -141,15 +142,18 @@ class DatabaseManager:
             return False
         
         try:
+            # Шифруем пароль перед сохранением
+            encrypted_password = password_crypto.encrypt_password(jira_password)
+            
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT OR REPLACE INTO user_jira_settings 
                     (user_email, user_id, jira_username, jira_password, updated_at)
                     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (user_email, user_id, jira_username, jira_password))
+                ''', (user_email, user_id, jira_username, encrypted_password))
                 conn.commit()
-                logger.info(f"Настройки Jira сохранены для пользователя {user_email}")
+                logger.info(f"Настройки Jira сохранены для пользователя {user_email} (пароль зашифрован)")
                 return True
         except Exception as e:
             logger.error(f"Ошибка сохранения настроек Jira для {user_email}: {e}")
@@ -166,7 +170,28 @@ class DatabaseManager:
                     WHERE user_email = ?
                 ''', (user_email,))
                 result = cursor.fetchone()
-                return result if result else None
+                
+                if result:
+                    user_id, jira_username, encrypted_password, last_test_success = result
+                    
+                    # Расшифровываем пароль
+                    try:
+                        # Проверяем, зашифрован ли пароль
+                        if password_crypto.is_encrypted(encrypted_password):
+                            decrypted_password = password_crypto.decrypt_password(encrypted_password)
+                        else:
+                            # Если пароль не зашифрован (старые данные), используем как есть
+                            # но в логе отметим это
+                            decrypted_password = encrypted_password
+                            logger.warning(f"Пароль для {user_email} не зашифрован - требуется обновление")
+                        
+                        return (user_id, jira_username, decrypted_password, last_test_success)
+                    
+                    except Exception as decrypt_error:
+                        logger.error(f"Ошибка расшифровки пароля для {user_email}: {decrypt_error}")
+                        return None
+                
+                return None
         except Exception as e:
             logger.error(f"Ошибка получения настроек Jira для {user_email}: {e}")
             return None
