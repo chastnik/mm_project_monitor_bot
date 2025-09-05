@@ -102,14 +102,9 @@ class StandupBot:
             ('MATTERMOST_TOKEN', config.MATTERMOST_TOKEN),
             ('MATTERMOST_CHANNEL_ID', config.MATTERMOST_CHANNEL_ID),
             ('JIRA_URL', config.JIRA_URL),
-            ('JIRA_USERNAME', config.JIRA_USERNAME),
         ]
         
-        # Проверяем аутентификацию для Jira
-        if config.JIRA_AUTH_METHOD.lower() == 'token':
-            required_settings.append(('JIRA_API_TOKEN', config.JIRA_API_TOKEN))
-        else:
-            required_settings.append(('JIRA_PASSWORD', config.JIRA_PASSWORD))
+        # Глобальная аутентификация Jira отключена - используются только персональные настройки пользователей
         
         # Tempo может быть опциональным (если используется только Jira API)
         if config.TEMPO_API_TOKEN:
@@ -137,12 +132,8 @@ class StandupBot:
         except Exception as e:
             raise Exception(f"Ошибка подключения к Mattermost: {e}")
         
-        # Тест Jira
-        try:
-            current_user = jira_client.jira_client.current_user()
-            self.logger.info(f"✅ Jira: подключен как {current_user}")
-        except Exception as e:
-            raise Exception(f"Ошибка подключения к Jira: {e}")
+        # Тест Jira - пропускаем, так как используются только персональные подключения
+        self.logger.info("✅ Jira: настроен для персональных подключений пользователей")
         
         
         # Тест канала
@@ -157,52 +148,121 @@ class StandupBot:
         try:
             # Регистрируем обработчик сообщений
             mattermost_client.driver.init_websocket(self._websocket_handler)
+            self.websocket = True  # Флаг успешной инициализации
             self.logger.info("✅ WebSocket настроен для получения сообщений")
+            
+            # Загружаем сохраненные сессии пользователей
+            user_sessions = mattermost_client.load_user_sessions()
+            if user_sessions:
+                self.logger.info(f"Загружено {len(user_sessions)} пользовательских сессий")
+            
         except Exception as e:
             self.logger.error(f"⚠️ Ошибка настройки WebSocket: {e}")
             self.logger.info("Бот будет работать без обработки команд в реальном времени")
+            self.websocket = False
     
     def _websocket_handler(self, message):
         """Обработчик WebSocket сообщений"""
         try:
-            if message.get('event') == 'posted':
-                post_data = message.get('data', {}).get('post')
-                if post_data:
-                    post = eval(post_data)  # Осторожно! В продакшене использовать json.loads
-                    
-                    # Игнорируем сообщения от бота
-                    if post.get('user_id') == mattermost_client.bot_user_id:
-                        return
-                    
-                    # Получаем информацию о пользователе
-                    user_id = post.get('user_id')
-                    user = mattermost_client.driver.users.get_user(user_id)
-                    user_email = user.get('email', '')
-                    
-                    # Получаем информацию о канале
-                    channel_id = post.get('channel_id')
-                    channel = mattermost_client.driver.channels.get_channel(channel_id)
-                    channel_type = channel.get('type', 'O')
-                    
-                    message_text = post.get('message', '')
-                    
-                    # Обрабатываем только личные сообщения или упоминания бота
-                    if channel_type == 'D' or f'@{mattermost_client.driver.users.get_user("me")["username"]}' in message_text:
-                        response = command_handler.handle_message(
-                            message_text, user_email, channel_type, 
-                            channel_id, team_id, user_id
-                        )
-                        
-                        if response:
-                            if channel_type == 'D':
-                                # Отправляем ответ в личные сообщения
-                                mattermost_client.send_direct_message(user_id, response)
-                            else:
-                                # Отправляем ответ в канал
-                                mattermost_client.send_channel_message(channel_id, response)
+            event = message.get('event')
+            
+            # Обработка новых сообщений
+            if event == 'posted':
+                self._handle_posted_message(message)
+            
+            # Обработка создания новых каналов (включая DM)
+            elif event == 'channel_created':
+                mattermost_client.handle_new_dm_channel(message.get('data', {}))
+            
+            # Обработка добавления пользователей в каналы
+            elif event == 'user_added':
+                self._handle_user_added(message.get('data', {}))
                 
         except Exception as e:
             self.logger.error(f"Ошибка обработки WebSocket сообщения: {e}")
+    
+    def _handle_posted_message(self, message):
+        """Обработка новых сообщений"""
+        try:
+            post_data = message.get('data', {}).get('post')
+            if not post_data:
+                return
+            
+            # Безопасный парсинг JSON
+            import json
+            try:
+                post = json.loads(post_data)
+            except (json.JSONDecodeError, TypeError):
+                # Fallback на eval для совместимости
+                post = eval(post_data)
+            
+            # Игнорируем сообщения от бота
+            if post.get('user_id') == mattermost_client.bot_user_id:
+                return
+            
+            # Получаем информацию о пользователе
+            user_id = post.get('user_id')
+            user = mattermost_client.driver.users.get_user(user_id)
+            user_email = user.get('email', '')
+            
+            # Получаем информацию о канале
+            channel_id = post.get('channel_id')
+            channel = mattermost_client.driver.channels.get_channel(channel_id)
+            channel_type = channel.get('type', 'O')
+            team_id = message.get('data', {}).get('team_id', '')
+            
+            message_text = post.get('message', '').strip()
+            
+            # Логируем получение сообщения для отладки
+            self.logger.debug(f"Получено сообщение от {user_email} в канале {channel_type}: {message_text[:50]}...")
+            
+            # Обрабатываем только личные сообщения или упоминания бота в каналах
+            should_process = False
+            
+            if channel_type == 'D':  # Личные сообщения
+                should_process = True
+            elif f'@{mattermost_client.bot_username}' in message_text:  # Упоминания в каналах
+                should_process = True
+            
+            if should_process and message_text:
+                # Автоматически инициализируем DM канал если это первое сообщение
+                if channel_type == 'D' and user_id not in mattermost_client.direct_channels:
+                    mattermost_client.direct_channels[user_id] = channel_id
+                    self.logger.info(f"Инициализирован новый DM канал: {user_id} -> {channel_id}")
+                
+                # Обрабатываем команду
+                response = command_handler.handle_message(
+                    message_text, user_email, channel_type, 
+                    channel_id, team_id, user_id
+                )
+                
+                if response:
+                    if channel_type == 'D':
+                        # Отправляем ответ в личные сообщения
+                        mattermost_client.send_direct_message(user_id, response)
+                    else:
+                        # Отправляем ответ в канал (с упоминанием пользователя)
+                        response_with_mention = f"@{user.get('username', user_email)} {response}"
+                        mattermost_client.send_channel_message(channel_id, response_with_mention)
+                        
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки сообщения: {e}")
+    
+    def _handle_user_added(self, event_data):
+        """Обработка добавления пользователей в каналы"""
+        try:
+            channel_id = event_data.get('channel_id')
+            user_id = event_data.get('user_id')
+            
+            if channel_id and user_id and user_id != mattermost_client.bot_user_id:
+                # Проверяем, является ли канал DM каналом
+                channel = mattermost_client.driver.channels.get_channel(channel_id)
+                if channel['type'] == 'D':
+                    mattermost_client.direct_channels[user_id] = channel_id
+                    self.logger.info(f"Добавлен пользователь в DM канал: {user_id} -> {channel_id}")
+                    
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки добавления пользователя: {e}")
     
     def _send_startup_message(self):
         """Отправить сообщение о запуске бота"""

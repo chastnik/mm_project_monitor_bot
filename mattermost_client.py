@@ -2,6 +2,8 @@
 Клиент для работы с Mattermost API
 """
 import logging
+import json
+import os
 from typing import List, Optional, Dict
 from mattermostdriver import Driver
 from config import config
@@ -12,6 +14,9 @@ class MattermostClient:
     def __init__(self):
         self.driver = None
         self.bot_user_id = None
+        self.bot_username = None
+        self.direct_channels = {}  # Кеш DM каналов: user_id -> channel_id
+        self.user_sessions_file = 'user_sessions.json'
         self.connect()
     
     def connect(self):
@@ -39,8 +44,12 @@ class MattermostClient:
             # Получаем информацию о боте
             me = self.driver.users.get_user('me')
             self.bot_user_id = me['id']
+            self.bot_username = me['username']
             
             logger.info(f"Успешно подключились к Mattermost как {me['username']}")
+            
+            # Инициализируем DM каналы
+            self._init_direct_channels()
             
         except Exception as e:
             logger.error(f"Ошибка подключения к Mattermost: {e}")
@@ -80,9 +89,11 @@ class MattermostClient:
     def send_direct_message(self, user_id: str, message: str) -> bool:
         """Отправить личное сообщение пользователю"""
         try:
-            # Создаем или получаем прямой канал
-            direct_channel = self.driver.channels.create_direct_message_channel([self.bot_user_id, user_id])
-            channel_id = direct_channel['id']
+            # Получаем или создаем DM канал
+            channel_id = self._get_or_create_dm_channel(user_id)
+            if not channel_id:
+                logger.error(f"Не удалось создать DM канал с пользователем {user_id}")
+                return False
             
             # Отправляем сообщение
             self.driver.posts.create_post({
@@ -207,6 +218,95 @@ class MattermostClient:
         """Получить текущую дату в читаемом формате"""
         from datetime import datetime
         return datetime.now().strftime("%d.%m.%Y")
+    
+    def _init_direct_channels(self):
+        """Инициализация существующих DM каналов"""
+        try:
+            # Получаем все каналы бота
+            channels = self.driver.channels.get_channels_for_user(self.bot_user_id, team_id='')
+            
+            dm_count = 0
+            for channel in channels:
+                if channel['type'] == 'D':  # Direct message channel
+                    # Получаем ID собеседника
+                    channel_members = self.driver.channels.get_channel_members(channel['id'])
+                    for member in channel_members:
+                        if member['user_id'] != self.bot_user_id:
+                            self.direct_channels[member['user_id']] = channel['id']
+                            dm_count += 1
+                            break
+            
+            logger.info(f"Инициализировано {dm_count} DM каналов")
+            
+        except Exception as e:
+            logger.warning(f"Ошибка инициализации DM каналов: {e}")
+    
+    def _get_or_create_dm_channel(self, user_id: str) -> Optional[str]:
+        """Получить или создать DM канал с пользователем"""
+        try:
+            # Проверяем кеш
+            if user_id in self.direct_channels:
+                return self.direct_channels[user_id]
+            
+            # Создаем новый DM канал
+            direct_channel = self.driver.channels.create_direct_message_channel([self.bot_user_id, user_id])
+            channel_id = direct_channel['id']
+            
+            # Сохраняем в кеш
+            self.direct_channels[user_id] = channel_id
+            
+            logger.info(f"Создан новый DM канал с пользователем {user_id}: {channel_id}")
+            return channel_id
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания DM канала с пользователем {user_id}: {e}")
+            return None
+    
+    def get_direct_channel_id(self, user_id: str) -> Optional[str]:
+        """Получить ID DM канала с пользователем"""
+        return self.direct_channels.get(user_id)
+    
+    def is_direct_message(self, channel_id: str) -> bool:
+        """Проверить, является ли канал личным сообщением"""
+        return channel_id in self.direct_channels.values()
+    
+    def load_user_sessions(self) -> dict:
+        """Загрузить сохраненные сессии пользователей"""
+        try:
+            if os.path.exists(self.user_sessions_file):
+                with open(self.user_sessions_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки сессий пользователей: {e}")
+        return {}
+    
+    def save_user_sessions(self, sessions: dict):
+        """Сохранить сессии пользователей"""
+        try:
+            with open(self.user_sessions_file, 'w', encoding='utf-8') as f:
+                json.dump(sessions, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения сессий пользователей: {e}")
+    
+    def handle_new_dm_channel(self, event_data: dict):
+        """Обработать создание нового DM канала"""
+        try:
+            channel_id = event_data.get('channel_id')
+            if not channel_id:
+                return
+            
+            # Получаем информацию о канале
+            channel = self.driver.channels.get_channel(channel_id)
+            if channel['type'] == 'D':
+                # Получаем участников канала
+                members = self.driver.channels.get_channel_members(channel_id)
+                for member in members:
+                    if member['user_id'] != self.bot_user_id:
+                        self.direct_channels[member['user_id']] = channel_id
+                        logger.info(f"Добавлен новый DM канал: {member['user_id']} -> {channel_id}")
+                        break
+        except Exception as e:
+            logger.error(f"Ошибка обработки нового DM канала: {e}")
 
 # Глобальный экземпляр клиента
 mattermost_client = MattermostClient()

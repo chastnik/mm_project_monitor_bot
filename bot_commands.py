@@ -316,7 +316,7 @@ class BotCommandHandler:
                 return f"⚠️ **Пароль обновлен, но есть проблема:**\n\n❌ {test_message}"
         else:
             return "❌ Ошибка обновления пароля"
-    
+
     def cmd_all_subscriptions(self, args: List[str], user_email: str) -> str:
         """Показать все подписки в системе (только для администраторов)"""
         subscriptions = db_manager.get_all_subscriptions()
@@ -429,28 +429,26 @@ class BotCommandHandler:
             return f"❌ Пользователь {email} не найден в базе данных"
     
     def cmd_list_users(self, args: List[str], user_email: str) -> str:
-        """Показать список отслеживаемых пользователей"""
-        users = db_manager.get_active_users()
+        """Показать список пользователей с настройками Jira"""
+        # Получаем всех пользователей с настройками Jira из БД
+        try:
+            import sqlite3
+            with sqlite3.connect(db_manager.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT user_email, jira_username FROM user_jira_settings')
+                users = cursor.fetchall()
+        except Exception as e:
+            return f"❌ Ошибка получения списка пользователей: {e}"
         
         if not users:
-            return "📝 Список отслеживаемых пользователей пуст"
+            return "📝 Нет пользователей с настройками Jira"
         
-        message_parts = ["📝 **Отслеживаемые пользователи:**\n"]
+        message_parts = ["📝 **Пользователи с настройками Jira:**\n"]
         
-        for i, (email, name, mm_id, jira_id) in enumerate(users, 1):
-            status_icons = []
-            if mm_id:
-                status_icons.append("💬")  # Mattermost
-            if jira_id:
-                status_icons.append("📋")  # Jira
-            
-            status = " ".join(status_icons) if status_icons else "❓"
-            display_name = name if name else email
-            
-            message_parts.append(f"{i}. {display_name} ({email}) {status}")
+        for i, (email, jira_username) in enumerate(users, 1):
+            message_parts.append(f"{i}. {email} (Jira: {jira_username})")
         
         message_parts.append(f"\n**Всего пользователей:** {len(users)}")
-        message_parts.append("\n💬 - найден в Mattermost, 📋 - найден в Jira")
         
         return "\n".join(message_parts)
     
@@ -542,9 +540,10 @@ class BotCommandHandler:
         
         message_parts.append(f"**Jira:** {jira_status}")
         
-        # Статистика пользователей
-        users = db_manager.get_active_users()
-        message_parts.append(f"**Отслеживаемые пользователи:** {len(users)}")
+        # Статистика подписок
+        subscriptions = db_manager.get_all_subscriptions()
+        active_subscriptions = [s for s in subscriptions if s[5]]  # активные подписки
+        message_parts.append(f"**Активные подписки:** {len(active_subscriptions)}")
         
         # Последняя проверка
         history = db_manager.get_check_history(1)

@@ -17,12 +17,11 @@ class Config:
     
     # Jira настройки (on-premise)
     JIRA_URL = os.getenv('JIRA_URL', 'https://jira.your-company.com')
-    JIRA_USERNAME = os.getenv('JIRA_USERNAME')
-    JIRA_API_TOKEN = os.getenv('JIRA_API_TOKEN')  # Для новых версий Jira Server
-    JIRA_PASSWORD = os.getenv('JIRA_PASSWORD')    # Для старых версий on-premise
-    JIRA_AUTH_METHOD = os.getenv('JIRA_AUTH_METHOD', 'password')  # 'token' или 'password'
     JIRA_VERIFY_SSL = os.getenv('JIRA_VERIFY_SSL', 'true').lower() == 'true'
     
+    # Tempo API настройки (опциональные)
+    TEMPO_API_URL = os.getenv('TEMPO_API_URL')
+    TEMPO_API_TOKEN = os.getenv('TEMPO_API_TOKEN')
     
     # База данных
     DATABASE_PATH = os.getenv('DATABASE_PATH', 'standup_bot.db')

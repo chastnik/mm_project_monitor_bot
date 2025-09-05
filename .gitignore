@@ -67,6 +67,7 @@ dmypy.json
 *.log
 *.pid
 *.sock
+user_sessions.json
 
 # OS generated files
 .DS_Store
