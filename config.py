@@ -35,6 +35,9 @@ class Config:
     # Часовой пояс
     TIMEZONE = os.getenv('TIMEZONE', 'Europe/Moscow')
     
+    # Webhook сервер
+    WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
+    
     # Логирование
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     LOG_FILE = os.getenv('LOG_FILE', 'standup_bot.log')

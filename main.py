@@ -291,8 +291,8 @@ class StandupBot:
 • Уведомления о просроченных сроках
 
 🌐 **API для команд:**
-• Webhook сервер: http://localhost:8080/
-• Health check: http://localhost:8080/health
+• Webhook сервер: http://localhost:{config.WEBHOOK_PORT}/
+• Health check: http://localhost:{config.WEBHOOK_PORT}/health
 • WebSocket отключен (SSL проблемы)
 
 🔧 **Доступные команды:**

@@ -76,6 +76,9 @@ JIRA_VERIFY_SSL=true
 TEMPO_API_URL=https://jira.your-company.com/rest/tempo-timesheets/4
 TEMPO_API_TOKEN=your_tempo_token
 
+# Webhook сервер для команд
+WEBHOOK_PORT=8080
+
 # Администраторы и расписание
 ADMIN_EMAILS=admin1@company.com,admin2@company.com
 CHECK_TIME=12:00

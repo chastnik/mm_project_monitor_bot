@@ -6,6 +6,7 @@ import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from bot_commands import command_handler
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,8 @@ class BotWebhookHandler(BaseHTTPRequestHandler):
 class WebhookServer:
     """Простой HTTP сервер для webhook"""
     
-    def __init__(self, port=8080):
-        self.port = port
+    def __init__(self, port=None):
+        self.port = port or config.WEBHOOK_PORT
         self.server = None
         self.thread = None
         
