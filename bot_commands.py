@@ -20,6 +20,7 @@ class BotCommandHandler:
             'setup_jira': self.cmd_setup_jira,
             'test_jira': self.cmd_test_jira,
             'change_password': self.cmd_change_password,
+            'run_subscriptions': self.cmd_run_subscriptions,
             'monitor_now': self.cmd_monitor_now,
             'all_subscriptions': self.cmd_all_subscriptions,
             'delete_subscription': self.cmd_delete_subscription,
@@ -56,7 +57,7 @@ class BotCommandHandler:
         if command in self.commands:
             try:
                 # Передаем дополнительные параметры для команд подписки
-                if command in ['subscribe', 'unsubscribe', 'list_subscriptions']:
+                if command in ['subscribe', 'unsubscribe', 'list_subscriptions', 'run_subscriptions']:
                     return self.commands[command](args, user_email, channel_id, team_id, user_id)
                 elif command in ['setup_jira', 'test_jira', 'change_password']:
                     return self.commands[command](args, user_email, user_id)
@@ -84,10 +85,13 @@ class BotCommandHandler:
 • `unsubscribe <PROJECT_KEY>` - отписать канал от мониторинга проекта  
 • `list_subscriptions` - показать активные подписки в канале
 
-**Информационные команды:**
-• `help` - показать эту справку
+**Управление мониторингом:**
+• `run_subscriptions` - запустить проверку подписок текущего канала
 • `history` - история уведомлений за последние дни
 • `status` - статус бота и активные подписки
+
+**Информационные команды:**
+• `help` - показать эту справку
 
 """
         
@@ -451,6 +455,56 @@ class BotCommandHandler:
         message_parts.append(f"\n**Всего пользователей:** {len(users)}")
         
         return "\n".join(message_parts)
+    
+    def cmd_run_subscriptions(self, args: List[str], user_email: str, channel_id: str = None, 
+                             team_id: str = None, user_id: str = None) -> str:
+        """Запустить проверку подписок для текущего канала"""
+        if not channel_id:
+            return "❌ Команда доступна только в каналах"
+        
+        # Проверяем, есть ли подписки для данного канала
+        subscriptions = db_manager.get_subscriptions_by_channel(channel_id)
+        if not subscriptions:
+            return "ℹ️ В этом канале нет активных подписок на проекты. Используйте `subscribe PROJECT_KEY` для добавления подписок."
+        
+        # Все подписки уже активные (фильтр в SQL)
+        active_subscriptions = subscriptions
+        if not active_subscriptions:
+            return "ℹ️ В этом канале нет активных подписок. Активируйте подписки или добавьте новые."
+        
+        try:
+            from project_monitor import project_monitor
+            
+            # Запускаем мониторинг только для подписок этого канала
+            # subscription: (project_key, project_name, subscribed_by_email, created_at, active)
+            project_keys = [sub[0] for sub in active_subscriptions]  # sub[0] - project_key
+            
+            logger.info(f"Запуск ручной проверки подписок канала {channel_id}: {project_keys}")
+            
+            results = []
+            for project_key in project_keys:
+                try:
+                    # Мониторим конкретный проект для конкретного канала
+                    result = project_monitor.monitor_project_for_channel(project_key, channel_id)
+                    if result:
+                        results.append(f"✅ {project_key}: {result}")
+                    else:
+                        results.append(f"ℹ️ {project_key}: нет проблем")
+                except Exception as e:
+                    logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
+                    results.append(f"❌ {project_key}: ошибка проверки")
+            
+            if results:
+                response = f"🔍 **Результаты проверки подписок канала:**\n\n" + "\n".join(results)
+                response += f"\n\n💡 Проверено проектов: {len(project_keys)}"
+            else:
+                response = "ℹ️ Проверка завершена, проблем не обнаружено"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Ошибка ручного мониторинга подписок: {e}")
+            return f"❌ Ошибка запуска проверки: {str(e)}"
     
     def cmd_monitor_now(self, args: List[str], user_email: str) -> str:
         """Запустить мониторинг всех проектов вручную"""

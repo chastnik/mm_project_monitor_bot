@@ -95,6 +95,74 @@ class ProjectMonitor:
         except Exception as e:
             logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
     
+    def monitor_project_for_channel(self, project_key: str, channel_id: str) -> str:
+        """Мониторинг конкретного проекта для канала с возвратом результата"""
+        logger.info(f"Ручная проверка проекта {project_key} для канала {channel_id}")
+        
+        try:
+            # Получаем подписку для определения пользователя, создавшего её
+            subscriptions = db_manager.get_subscriptions_by_channel(channel_id)
+            project_subscription = None
+            
+            for subscription in subscriptions:
+                if subscription[0] == project_key:  # project_key в позиции 0
+                    project_subscription = subscription
+                    break
+            
+            if not project_subscription:
+                return f"Подписка на проект не найдена в канале"
+            
+            # Извлекаем данные подписки
+            # subscription: (project_key, project_name, subscribed_by_email, created_at, active)
+            project_name = project_subscription[1]  # project_name
+            subscribed_by_email = project_subscription[2]  # subscribed_by_email
+            
+            # Получаем все задачи проекта через персональное подключение
+            issues = self.get_project_issues(subscribed_by_email, project_key)
+            
+            if not issues:
+                return f"Нет задач в проекте или нет доступа"
+            
+            logger.info(f"Найдено {len(issues)} задач в проекте {project_key}")
+            
+            problems_found = []
+            
+            for issue in issues:
+                try:
+                    # Проверяем превышение трудозатрат
+                    if self.check_time_exceeded(issue):
+                        problems_found.append(f"⏱️ {issue.key}: превышение трудозатрат")
+                    
+                    # Проверяем просроченные сроки
+                    if self.check_deadline_overdue(issue):
+                        problems_found.append(f"📅 {issue.key}: просроченный срок")
+                        
+                except Exception as e:
+                    logger.error(f"Ошибка проверки задачи {issue.key}: {e}")
+                    problems_found.append(f"❌ {issue.key}: ошибка проверки")
+                    continue
+            
+            if problems_found:
+                result = f"найдено проблем: {len(problems_found)}"
+                # Отправляем уведомления для найденных проблем
+                for issue in issues:
+                    try:
+                        if self.check_time_exceeded(issue):
+                            self.send_time_exceeded_notification(issue, project_key, channel_id)
+                        if self.check_deadline_overdue(issue):
+                            self.send_deadline_notification(issue, project_key, channel_id)
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки уведомления для {issue.key}: {e}")
+            else:
+                result = "проблем не найдено"
+            
+            logger.info(f"Проект {project_key}: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
+            return f"ошибка проверки: {str(e)}"
+    
     def get_project_issues(self, user_email: str, project_key: str) -> List:
         """Получить все задачи проекта через персональное подключение"""
         try:

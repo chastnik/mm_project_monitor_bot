@@ -290,7 +290,7 @@ class DatabaseManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT project_key, project_name, subscribed_by_email, created_at
+                    SELECT project_key, project_name, subscribed_by_email, created_at, active
                     FROM project_subscriptions 
                     WHERE mattermost_channel_id = ? AND active = 1
                     ORDER BY created_at DESC
