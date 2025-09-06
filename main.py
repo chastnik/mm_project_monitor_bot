@@ -148,17 +148,44 @@ class StandupBot:
         try:
             # Регистрируем обработчик сообщений
             mattermost_client.driver.init_websocket(self._websocket_handler)
-            self.websocket = True  # Флаг успешной инициализации
-            self.logger.info("✅ WebSocket настроен для получения сообщений")
             
-            # Загружаем сохраненные сессии пользователей
-            user_sessions = mattermost_client.load_user_sessions()
-            if user_sessions:
-                self.logger.info(f"Загружено {len(user_sessions)} пользовательских сессий")
+            # Даем время на подключение и проверяем статус
+            import time
+            time.sleep(2)
+            
+            # Проверяем, есть ли активное WebSocket подключение
+            if hasattr(mattermost_client.driver, 'websocket') and mattermost_client.driver.websocket:
+                websocket_status = getattr(mattermost_client.driver.websocket, 'websocket', None)
+                if websocket_status and hasattr(websocket_status, 'state'):
+                    from websockets.protocol import State
+                    if websocket_status.state == State.OPEN:
+                        self.websocket = True
+                        self.logger.info("✅ WebSocket успешно подключен")
+                    else:
+                        self.websocket = False
+                        self.logger.warning("⚠️ WebSocket не подключен (SSL проблемы)")
+                        self.logger.info("💡 Бот продолжит работать в режиме планировщика (без команд в реальном времени)")
+                else:
+                    self.websocket = False
+                    self.logger.warning("⚠️ WebSocket подключение не установлено")
+            else:
+                self.websocket = False
+                self.logger.warning("⚠️ WebSocket не инициализирован")
+            
+            if self.websocket:
+                # Загружаем сохраненные сессии пользователей только при успешном WebSocket
+                user_sessions = mattermost_client.load_user_sessions()
+                if user_sessions:
+                    self.logger.info(f"Загружено {len(user_sessions)} пользовательских сессий")
             
         except Exception as e:
-            self.logger.error(f"⚠️ Ошибка настройки WebSocket: {e}")
-            self.logger.info("Бот будет работать без обработки команд в реальном времени")
+            self.logger.warning(f"⚠️ Ошибка настройки WebSocket: {e}")
+            if "SSL" in str(e) or "TLS" in str(e) or "PROTOCOL_TLS_SERVER" in str(e):
+                self.logger.info("🔧 Обнаружены проблемы с SSL/TLS для WebSocket")
+                self.logger.info("💡 Бот продолжит работать в режиме планировщика (без команд в реальном времени)")
+                self.logger.info("💡 Для исправления: проверьте настройки SSL сертификатов Mattermost")
+            else:
+                self.logger.info("Бот будет работать без обработки команд в реальном времени")
             self.websocket = False
     
     def _websocket_handler(self, message):

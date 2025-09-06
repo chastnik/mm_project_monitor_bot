@@ -4,9 +4,12 @@
 import logging
 import json
 import os
+import ssl
 from typing import List, Optional, Dict
 from mattermostdriver import Driver
 from config import config
+
+# Простое решение WebSocket SSL проблем - отключение WebSocket при проблемах
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,8 @@ class MattermostClient:
             port = parsed_url.port or (443 if scheme == 'https' else 80)
             hostname = parsed_url.hostname or parsed_url.netloc
             
-            self.driver = Driver({
+            # Настройки для WebSocket SSL подключения
+            driver_options = {
                 'url': hostname,
                 'token': config.MATTERMOST_TOKEN,
                 'scheme': scheme,
@@ -37,7 +41,15 @@ class MattermostClient:
                 'basepath': '/api/v4',
                 'verify': config.MATTERMOST_SSL_VERIFY,
                 'timeout': 30,
-            })
+            }
+            
+            # Исправление SSL проблем с WebSocket
+            if scheme == 'https':
+                logger.info(f"🔧 Настройка HTTPS WebSocket, SSL проверка: {config.MATTERMOST_SSL_VERIFY}")
+                # Не добавляем websocket_kw_args, так как mattermostdriver сам управляет SSL
+                # Проблема была в том, что библиотека использует неправильный SSL контекст
+            
+            self.driver = Driver(driver_options)
             
             self.driver.login()
             
