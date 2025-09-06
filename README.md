@@ -92,6 +92,7 @@ CHECK_TIME=12:00
 - `subscribe PROJECT_KEY` - подписать канал на мониторинг проекта
 - `unsubscribe PROJECT_KEY` - отписать канал от мониторинга проекта
 - `list_subscriptions` - показать активные подписки в канале
+- `run_subscriptions` - запустить проверку подписок текущего канала вручную
 
 ### Информационные команды:
 - `help` - справка по командам
@@ -231,6 +232,7 @@ flowchart TD
     MANAGE{Управление<br/>подписками?}
     
     LIST_SUBS[Команда: list_subscriptions<br/>Просмотр активных подписок]
+    RUN_SUBS[Команда: run_subscriptions<br/>Ручная проверка подписок канала]
     UNSUB[Команда: unsubscribe PROJECT_KEY<br/>Отписка от проекта]
     HISTORY[Команда: history<br/>История уведомлений]
     
@@ -262,8 +264,10 @@ flowchart TD
     SAVE_HISTORY --> END
     ISSUES_FOUND -->|Нет| END
     
-    MANAGE -->|Да| LIST_SUBS
+    MANAGE -->|Просмотр| LIST_SUBS
     LIST_SUBS --> END
+    MANAGE -->|Ручная проверка| RUN_SUBS
+    RUN_SUBS --> END
     MANAGE -->|Отписка| UNSUB
     UNSUB --> END
     MANAGE -->|История| HISTORY
@@ -279,7 +283,7 @@ flowchart TD
     classDef error fill:#ffebee,stroke:#f44336,stroke-width:2px
     
     class START,END startEnd
-    class SETUP_JIRA,TEST_JIRA,SUB_CMD,CHECK_ACCESS,SAVE_SUB,MONITOR_CYCLE,CHECK_ISSUES,SEND_NOTIFICATIONS,SAVE_HISTORY,LIST_SUBS,UNSUB,HISTORY process
+    class SETUP_JIRA,TEST_JIRA,SUB_CMD,CHECK_ACCESS,SAVE_SUB,MONITOR_CYCLE,CHECK_ISSUES,SEND_NOTIFICATIONS,SAVE_HISTORY,LIST_SUBS,RUN_SUBS,UNSUB,HISTORY process
     class SETUP,SUBSCRIBE,ACCESS_OK,ISSUES_FOUND,MANAGE decision
     class SETUP_JIRA security
     class ERROR_ACCESS error
