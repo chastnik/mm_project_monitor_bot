@@ -146,46 +146,14 @@ class StandupBot:
     def _setup_websocket(self):
         """Настройка WebSocket для получения сообщений"""
         try:
-            # Регистрируем обработчик сообщений
+            # Пытаемся инициализировать WebSocket
             mattermost_client.driver.init_websocket(self._websocket_handler)
-            
-            # Даем время на подключение и проверяем статус
-            import time
-            time.sleep(2)
-            
-            # Проверяем, есть ли активное WebSocket подключение
-            if hasattr(mattermost_client.driver, 'websocket') and mattermost_client.driver.websocket:
-                websocket_status = getattr(mattermost_client.driver.websocket, 'websocket', None)
-                if websocket_status and hasattr(websocket_status, 'state'):
-                    from websockets.protocol import State
-                    if websocket_status.state == State.OPEN:
-                        self.websocket = True
-                        self.logger.info("✅ WebSocket успешно подключен")
-                    else:
-                        self.websocket = False
-                        self.logger.warning("⚠️ WebSocket не подключен (SSL проблемы)")
-                        self.logger.info("💡 Бот продолжит работать в режиме планировщика (без команд в реальном времени)")
-                else:
-                    self.websocket = False
-                    self.logger.warning("⚠️ WebSocket подключение не установлено")
-            else:
-                self.websocket = False
-                self.logger.warning("⚠️ WebSocket не инициализирован")
-            
-            if self.websocket:
-                # Загружаем сохраненные сессии пользователей только при успешном WebSocket
-                user_sessions = mattermost_client.load_user_sessions()
-                if user_sessions:
-                    self.logger.info(f"Загружено {len(user_sessions)} пользовательских сессий")
+            self.websocket = True
+            self.logger.info("✅ WebSocket настроен для получения сообщений")
             
         except Exception as e:
             self.logger.warning(f"⚠️ Ошибка настройки WebSocket: {e}")
-            if "SSL" in str(e) or "TLS" in str(e) or "PROTOCOL_TLS_SERVER" in str(e):
-                self.logger.info("🔧 Обнаружены проблемы с SSL/TLS для WebSocket")
-                self.logger.info("💡 Бот продолжит работать в режиме планировщика (без команд в реальном времени)")
-                self.logger.info("💡 Для исправления: проверьте настройки SSL сертификатов Mattermost")
-            else:
-                self.logger.info("Бот будет работать без обработки команд в реальном времени")
+            self.logger.info("💡 Бот продолжит работать в режиме планировщика (без команд в реальном времени)")
             self.websocket = False
     
     def _websocket_handler(self, message):
@@ -197,9 +165,9 @@ class StandupBot:
             if event == 'posted':
                 self._handle_posted_message(message)
             
-            # Обработка создания новых каналов (включая DM)
+            # Обработка создания новых каналов (включая DM) - упрощено
             elif event == 'channel_created':
-                mattermost_client.handle_new_dm_channel(message.get('data', {}))
+                pass  # Упрощенная версия не требует предварительной инициализации DM каналов
             
             # Обработка добавления пользователей в каналы
             elif event == 'user_added':
@@ -253,9 +221,7 @@ class StandupBot:
             
             if should_process and message_text:
                 # Автоматически инициализируем DM канал если это первое сообщение
-                if channel_type == 'D' and user_id not in mattermost_client.direct_channels:
-                    mattermost_client.direct_channels[user_id] = channel_id
-                    self.logger.info(f"Инициализирован новый DM канал: {user_id} -> {channel_id}")
+                # Личные сообщения обрабатываются автоматически в упрощенной версии
                 
                 # Обрабатываем команду
                 response = command_handler.handle_message(
@@ -276,20 +242,9 @@ class StandupBot:
             self.logger.error(f"Ошибка обработки сообщения: {e}")
     
     def _handle_user_added(self, event_data):
-        """Обработка добавления пользователей в каналы"""
-        try:
-            channel_id = event_data.get('channel_id')
-            user_id = event_data.get('user_id')
-            
-            if channel_id and user_id and user_id != mattermost_client.bot_user_id:
-                # Проверяем, является ли канал DM каналом
-                channel = mattermost_client.driver.channels.get_channel(channel_id)
-                if channel['type'] == 'D':
-                    mattermost_client.direct_channels[user_id] = channel_id
-                    self.logger.info(f"Добавлен пользователь в DM канал: {user_id} -> {channel_id}")
-                    
-        except Exception as e:
-            self.logger.error(f"Ошибка обработки добавления пользователя: {e}")
+        """Обработка добавления пользователей в каналы - упрощенная версия"""
+        # В упрощенной версии не требуется предварительное кеширование DM каналов
+        pass
     
     def _send_startup_message(self):
         """Отправить сообщение о запуске бота"""
