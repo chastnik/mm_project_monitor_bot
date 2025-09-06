@@ -15,6 +15,7 @@ from mattermost_client import mattermost_client
 from jira_client import jira_client
 from scheduler import scheduler
 from bot_commands import command_handler
+from webhook_server import webhook_server
 
 # Настройка логирования
 def setup_logging():
@@ -64,8 +65,14 @@ class StandupBot:
             # Настраиваем WebSocket для получения сообщений
             self._setup_websocket()
             
+            # Запускаем webhook сервер как альтернативу WebSocket
+            self._setup_webhook_server()
+            
             # Отправляем сообщение о запуске
             self._send_startup_message()
+            
+            # Информация о режиме работы
+            self._send_mode_info()
             
             self.running = True
             self.logger.info("🎉 Бот успешно запущен и готов к работе!")
@@ -85,6 +92,9 @@ class StandupBot:
         
         # Останавливаем планировщик
         scheduler.stop()
+        
+        # Останавливаем webhook сервер
+        webhook_server.stop()
         
         # Закрываем WebSocket
         if self.websocket:
@@ -144,17 +154,21 @@ class StandupBot:
         self.logger.info(f"✅ Канал найден: {channel_info['display_name']}")
     
     def _setup_websocket(self):
-        """Настройка WebSocket для получения сообщений"""
+        """Настройка WebSocket для получения сообщений - отключено для стабильности"""
+        # WebSocket отключен из-за SSL проблем - бот работает в режиме планировщика
+        self.websocket = False
+        self.logger.info("ℹ️ WebSocket отключен - бот работает в режиме планировщика")
+        self.logger.info("💡 Команды доступны через REST API вызовы")
+        self.logger.info("📅 Автоматические проверки выполняются по расписанию")
+    
+    def _setup_webhook_server(self):
+        """Настройка webhook сервера для обработки команд"""
         try:
-            # Пытаемся инициализировать WebSocket
-            mattermost_client.driver.init_websocket(self._websocket_handler)
-            self.websocket = True
-            self.logger.info("✅ WebSocket настроен для получения сообщений")
-            
+            webhook_server.start()
+            self.logger.info("✅ Webhook сервер запущен как альтернатива WebSocket")
         except Exception as e:
-            self.logger.warning(f"⚠️ Ошибка настройки WebSocket: {e}")
-            self.logger.info("💡 Бот продолжит работать в режиме планировщика (без команд в реальном времени)")
-            self.websocket = False
+            self.logger.warning(f"⚠️ Ошибка запуска webhook сервера: {e}")
+            self.logger.info("💡 Бот продолжит работать только в режиме планировщика")
     
     def _websocket_handler(self, message):
         """Обработчик WebSocket сообщений"""
@@ -265,6 +279,35 @@ class StandupBot:
             
         except Exception as e:
             self.logger.error(f"Ошибка отправки сообщения о запуске: {e}")
+    
+    def _send_mode_info(self):
+        """Отправить информацию о режиме работы бота"""
+        try:
+            mode_message = f"""ℹ️ **Режим работы: Планировщик + Webhook API**
+
+📅 **Автоматические функции:**
+• Ежедневная проверка проектов в {config.CHECK_TIME}
+• Уведомления о превышении трудозатрат  
+• Уведомления о просроченных сроках
+
+🌐 **API для команд:**
+• Webhook сервер: http://localhost:8080/
+• Health check: http://localhost:8080/health
+• WebSocket отключен (SSL проблемы)
+
+🔧 **Доступные команды:**
+• `run_subscriptions` - ручная проверка подписок канала
+• `subscribe PROJECT_KEY` - подписка на мониторинг проекта
+• `list_subscriptions` - просмотр подписок канала
+• `setup_jira username password` - настроить доступ к Jira
+• `help` - полная справка
+
+🔒 **Безопасность:** Пароли шифруются AES-256 + PBKDF2HMAC"""
+
+            mattermost_client.send_channel_message(config.MATTERMOST_CHANNEL_ID, mode_message)
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки информации о режиме: {e}")
     
     def _run_main_loop(self):
         """Основной цикл работы бота"""
