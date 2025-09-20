@@ -123,11 +123,14 @@ class DatabaseManager:
     def save_user_jira_settings(self, user_email: str, user_id: str, jira_username: str, jira_password: str) -> bool:
         """Сохранить настройки подключения к Jira для пользователя"""
         # Валидация входных данных
-        if not self._validate_email(user_email):
-            logger.error(f"Некорректный email: {user_email}")
-            return False
+        # Если email валидный - используем его, иначе используем user_id как идентификатор
+        if self._validate_email(user_email):
+            user_email = self._sanitize_input(user_email.lower())
+        else:
+            # Если email невалидный, используем user_id как идентификатор
+            user_email = f"user_{self._sanitize_input(user_id)}"
+            logger.info(f"Используем user_id как идентификатор: {user_email}")
         
-        user_email = self._sanitize_input(user_email.lower())
         user_id = self._sanitize_input(user_id)
         jira_username = self._sanitize_input(jira_username)
         
@@ -164,12 +167,24 @@ class DatabaseManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                
+                # Сначала пробуем найти по email
                 cursor.execute('''
                     SELECT user_id, jira_username, jira_password, last_test_success
                     FROM user_jira_settings 
                     WHERE user_email = ?
                 ''', (user_email,))
                 result = cursor.fetchone()
+                
+                # Если не найден по email, пробуем найти по user_id (если email начинается с "user_")
+                if not result and user_email.startswith("user_"):
+                    user_id = user_email[5:]  # Убираем префикс "user_"
+                    cursor.execute('''
+                        SELECT user_id, jira_username, jira_password, last_test_success
+                        FROM user_jira_settings 
+                        WHERE user_id = ?
+                    ''', (user_id,))
+                    result = cursor.fetchone()
                 
                 if result:
                     user_id, jira_username, encrypted_password, last_test_success = result

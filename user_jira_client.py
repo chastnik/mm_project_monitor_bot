@@ -77,7 +77,7 @@ class UserJiraClient:
             if jira_client:
                 # Дополнительные тесты
                 current_user = jira_client.current_user()
-                projects = jira_client.projects()[:5]  # Первые 5 проектов
+                projects = jira_client.projects()  # Все доступные проекты
                 
                 return True, f"✅ Подключение успешно! Пользователь: {current_user}, доступно проектов: {len(projects)}"
             else:

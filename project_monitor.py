@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Optional
 from database import db_manager
 from mattermost_client import mattermost_client
 from user_jira_client import user_jira_client
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -372,10 +373,14 @@ class ProjectMonitor:
         """Форматировать сообщение о превышении времени"""
         excess_hours = actual_hours - planned_hours
         
+        # Создаем ссылку на задачу в Jira
+        jira_url = f"{config.JIRA_URL}/browse/{issue_key}"
+        task_link = f"[{issue_key}]({jira_url})"
+        
         if for_channel:
             return f"""🚨 **Превышение трудозатрат**
 
-📋 **Задача:** {issue_key} - {summary[:50]}{'...' if len(summary) > 50 else ''}
+📋 **Задача:** {task_link} - {summary[:50]}{'...' if len(summary) > 50 else ''}
 👤 **Ответственный:** {assignee}
 ⏱️ **Плановые часы:** {planned_hours:.1f}ч
 📈 **Фактические часы:** {actual_hours:.1f}ч
@@ -385,7 +390,7 @@ class ProjectMonitor:
         else:
             return f"""🚨 **Превышение трудозатрат по вашей задаче**
 
-📋 **Задача:** {issue_key} - {summary}
+📋 **Задача:** {task_link} - {summary}
 ⏱️ **Плановые часы:** {planned_hours:.1f}ч  
 📈 **Фактические часы:** {actual_hours:.1f}ч
 ❗ **Превышение:** {excess_hours:.1f}ч
@@ -401,10 +406,14 @@ class ProjectMonitor:
         except:
             formatted_date = due_date
         
+        # Создаем ссылку на задачу в Jira
+        jira_url = f"{config.JIRA_URL}/browse/{issue_key}"
+        task_link = f"[{issue_key}]({jira_url})"
+        
         if for_channel:
             return f"""⏰ **Просрочен срок выполнения**
 
-📋 **Задача:** {issue_key} - {summary[:50]}{'...' if len(summary) > 50 else ''}
+📋 **Задача:** {task_link} - {summary[:50]}{'...' if len(summary) > 50 else ''}
 👤 **Ответственный:** {assignee}
 📅 **Срок выполнения:** {formatted_date}
 ❗ **Статус:** Просрочено
@@ -413,7 +422,7 @@ class ProjectMonitor:
         else:
             return f"""⏰ **Просрочен срок по вашей задаче**
 
-📋 **Задача:** {issue_key} - {summary}
+📋 **Задача:** {task_link} - {summary}
 📅 **Срок выполнения был:** {formatted_date}
 
 Пожалуйста, обновите статус задачи или свяжитесь с руководителем проекта."""

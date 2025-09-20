@@ -2,7 +2,13 @@
 Упрощенный клиент для работы с Mattermost API по образцу mm_bot_summary
 """
 import logging
-from typing import Optional, Dict
+import asyncio
+import json
+import websockets
+import ssl
+import time
+from typing import Optional, Dict, Any
+from urllib.parse import urlparse
 from mattermostdriver import Driver
 from config import config
 
@@ -13,6 +19,8 @@ class MattermostClient:
         self.driver = None
         self.bot_user_id = None
         self.bot_username = None
+        self._running = False
+        self._websocket = None
         self._connect()
     
     def _connect(self):
@@ -100,8 +108,474 @@ class MattermostClient:
     
     def is_user_admin(self, user_email: str) -> bool:
         """Проверить, является ли пользователь администратором"""
-        admin_emails = config.ADMIN_EMAILS.split(',') if config.ADMIN_EMAILS else []
+        admin_emails = config.ADMIN_EMAILS if config.ADMIN_EMAILS else []
         return user_email.strip() in [email.strip() for email in admin_emails]
+    
+    def start_listening(self):
+        """Запуск прослушивания WebSocket сообщений"""
+        if not self.driver:
+            logger.error("❌ Драйвер Mattermost не инициализирован")
+            return
+        
+        self._running = True
+        logger.info("🎧 Начинаю прослушивание событий WebSocket...")
+        
+        # Основной цикл переподключения
+        while self._running:
+            try:
+                asyncio.run(self._connect_websocket())
+            except Exception as e:
+                logger.error(f"❌ Ошибка WebSocket соединения: {e}")
+                if self._running:
+                    logger.info("🔄 Переподключение через 5 секунд...")
+                    time.sleep(5)
+    
+    async def _connect_websocket(self):
+        """Подключение к WebSocket"""
+        # Парсим URL для WebSocket
+        parsed_url = urlparse(config.MATTERMOST_URL)
+        
+        # Определяем схему WebSocket
+        ws_scheme = 'wss' if parsed_url.scheme == 'https' else 'ws'
+        ws_port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
+        
+        ws_url = f"{ws_scheme}://{parsed_url.hostname}:{ws_port}/api/v4/websocket"
+        
+        logger.info(f"🔌 Подключение к WebSocket: {ws_url}")
+        
+        # Настройка SSL контекста
+        ssl_context = None
+        if ws_scheme == 'wss':
+            ssl_context = ssl.create_default_context()
+            # Для разработки можно отключить проверку сертификатов
+            if not config.MATTERMOST_SSL_VERIFY:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+        
+        try:
+            # Подключение к WebSocket
+            async with websockets.connect(
+                ws_url,
+                ssl=ssl_context,
+                ping_interval=30,
+                ping_timeout=10,
+                close_timeout=10
+            ) as websocket:
+                self._websocket = websocket
+                
+                # Аутентификация
+                await self._authenticate_websocket()
+                
+                logger.info("✅ WebSocket подключен и аутентифицирован")
+                
+                # Основной цикл обработки сообщений
+                async for message in websocket:
+                    if not self._running:
+                        break
+                    # Обрабатываем разные типы сообщений WebSocket
+                    if isinstance(message, bytes):
+                        message_str = message.decode()
+                    else:
+                        message_str = str(message)
+                    await self._handle_websocket_message(message_str)
+                    
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("⚠️ WebSocket соединение закрыто")
+        except Exception as e:
+            logger.error(f"❌ Ошибка WebSocket: {e}")
+            raise
+    
+    async def _authenticate_websocket(self):
+        """Аутентификация WebSocket соединения"""
+        if self._websocket is None:
+            raise Exception("WebSocket соединение не установлено")
+            
+        auth_message = {
+            "seq": 1,
+            "action": "authentication_challenge",
+            "data": {
+                "token": config.MATTERMOST_TOKEN
+            }
+        }
+        
+        await self._websocket.send(json.dumps(auth_message))
+        
+        # Ждем подтверждения аутентификации
+        auth_timeout = 10
+        start_time = time.time()
+        
+        while time.time() - start_time < auth_timeout:
+            try:
+                message = await asyncio.wait_for(self._websocket.recv(), timeout=1.0)
+                event = json.loads(message)
+                
+                if event.get('event') == 'hello':
+                    logger.info("✅ WebSocket аутентификация успешна")
+                    return
+                    
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"❌ Ошибка аутентификации WebSocket: {e}")
+                raise
+        
+        raise Exception("Таймаут аутентификации WebSocket")
+    
+    async def _handle_websocket_message(self, message: str):
+        """Обработка сообщения от WebSocket"""
+        try:
+            event = json.loads(message)
+            event_type = event.get('event')
+            
+            # Обрабатываем различные типы событий
+            if event_type == 'posted':
+                await self._handle_post_event(event)
+            elif event_type == 'hello':
+                logger.debug("💬 Получен hello от WebSocket")
+            else:
+                logger.debug(f"💬 Событие WebSocket: {event_type}")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON от WebSocket: {e}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки WebSocket сообщения: {e}")
+    
+    async def _handle_post_event(self, event: Dict[str, Any]):
+        """Обработка события нового поста"""
+        try:
+            # Извлекаем данные поста
+            post_data = event.get('data', {}).get('post')
+            if not post_data:
+                return
+            
+            # Парсим пост (может быть строкой JSON)
+            if isinstance(post_data, str):
+                post = json.loads(post_data)
+            else:
+                post = post_data
+            
+            # Игнорируем сообщения от самого бота
+            if post.get('user_id') == self.bot_user_id:
+                return
+            
+            message = post.get('message', '').strip()
+            channel_id = post.get('channel_id')
+            post_id = post.get('id')
+            user_id = post.get('user_id')
+            root_id = post.get('root_id') or post_id  # ID треда или самого поста
+            
+            # Проверяем, является ли это личным сообщением
+            if self._is_direct_message(channel_id):
+                await self._handle_direct_message(channel_id, message, user_id)
+                return
+            
+            # В каналах обрабатываем только команды с упоминанием бота
+            if self._is_bot_mentioned(message):
+                logger.info(f"📝 Получена команда с упоминанием бота в канале {channel_id}")
+                await self._handle_bot_mention_command(channel_id, message, user_id, root_id, post_id)
+                return
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки события поста: {e}")
+    
+    def _is_direct_message(self, channel_id: str) -> bool:
+        """Проверяет, является ли канал личным сообщением"""
+        try:
+            # Получаем информацию о канале
+            channel_info = self.driver.channels.get_channel(channel_id)
+            return channel_info.get('type') == 'D'  # D = Direct message
+        except:
+            return False
+    
+    def _is_bot_mentioned(self, message: str) -> bool:
+        """Проверяет, упоминается ли бот в сообщении"""
+        if not self.bot_username:
+            return False
+        
+        # Проверяем упоминания через @username
+        mention_patterns = [
+            f'@{self.bot_username}',
+            f'@jora',  # Имя из конфигурации
+            f'@Жора',  # Отображаемое имя в канале
+            f'@project-monitor-bot',  # Полное имя
+            f'@project_monitor_bot',  # Альтернативное имя
+        ]
+        
+        message_lower = message.lower()
+        return any(mention in message_lower for mention in mention_patterns)
+    
+    def _is_command(self, message: str) -> bool:
+        """Проверяет, является ли сообщение командой"""
+        message_lower = message.lower().strip()
+        
+        # Расширенный список команд с алиасами
+        command_aliases = {
+            'help': ['help', 'справка', 'помощь', 'хелп', 'команды', 'что умеешь'],
+            'subscribe': ['subscribe', 'подписка', 'подпиши', 'подпиши на проект', 'проект', 'мониторить', 'отслеживать'],
+            'unsubscribe': ['unsubscribe', 'отписка', 'отпиши', 'отпиши от проекта', 'не мониторить', 'не отслеживать'],
+            'list_subscriptions': ['list_subscriptions', 'подписки', 'список подписок', 'мои подписки', 'что отслеживаешь'],
+            'run_subscriptions': ['run_subscriptions', 'проверь', 'проверь подписки', 'запусти проверку', 'мониторинг'],
+            'list_projects': ['list_projects', 'проекты', 'список проектов', 'все проекты', 'доступные проекты', 'показать проекты', 'какие проекты'],
+            'setup_jira': ['setup_jira', 'настрой jira', 'настрой подключение', 'jira настройка'],
+            'test_jira': ['test_jira', 'проверь jira', 'тест jira', 'проверь подключение'],
+            'change_password': ['change_password', 'смени пароль', 'измени пароль', 'новый пароль'],
+            'history': ['history', 'история', 'история уведомлений', 'что было'],
+            'status': ['status', 'статус', 'как дела', 'что происходит']
+        }
+        
+        # Проверяем все алиасы команд
+        for command, aliases in command_aliases.items():
+            if any(alias in message_lower for alias in aliases):
+                return True
+        
+        return False
+    
+    def _get_main_command(self, message: str) -> str:
+        """Получить основную команду из алиаса"""
+        message_lower = message.lower().strip()
+        
+        command_aliases = {
+            'help': ['help', 'справка', 'помощь', 'хелп', 'команды', 'что умеешь'],
+            'subscribe': ['subscribe', 'подписка', 'подпиши', 'подпиши на проект', 'проект', 'мониторить', 'отслеживать'],
+            'unsubscribe': ['unsubscribe', 'отписка', 'отпиши', 'отпиши от проекта', 'не мониторить', 'не отслеживать'],
+            'list_subscriptions': ['list_subscriptions', 'подписки', 'список подписок', 'мои подписки', 'что отслеживаешь'],
+            'run_subscriptions': ['run_subscriptions', 'проверь', 'проверь подписки', 'запусти проверку', 'мониторинг'],
+            'list_projects': ['list_projects', 'проекты', 'список проектов', 'все проекты', 'доступные проекты', 'показать проекты', 'какие проекты'],
+            'setup_jira': ['setup_jira', 'настрой jira', 'настрой подключение', 'jira настройка'],
+            'test_jira': ['test_jira', 'проверь jira', 'тест jira', 'проверь подключение'],
+            'change_password': ['change_password', 'смени пароль', 'измени пароль', 'новый пароль'],
+            'history': ['history', 'история', 'история уведомлений', 'что было'],
+            'status': ['status', 'статус', 'как дела', 'что происходит']
+        }
+        
+        for command, aliases in command_aliases.items():
+            if any(alias in message_lower for alias in aliases):
+                return command
+        
+        return 'unknown'
+    
+    async def _handle_direct_message(self, channel_id: str, message: str, user_id: str):
+        """Обработка личных сообщений"""
+        try:
+            # Получаем информацию о пользователе
+            user = self.driver.users.get_user(user_id)
+            username = user.get('username', 'Неизвестный')
+            
+            logger.info(f"📨 Получено личное сообщение от {username}: {message}")
+            
+            # Обрабатываем команды
+            if self._is_command(message):
+                await self._handle_command(channel_id, message, user_id, username)
+            else:
+                # Для любого другого сообщения отправляем справку с подсказками
+                await self._send_help_with_suggestions(channel_id, message)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки личного сообщения: {e}")
+    
+    async def _handle_bot_mention_command(self, channel_id: str, message: str, user_id: str, root_id: str, post_id: str):
+        """Обработка команд с упоминанием бота"""
+        try:
+            # Получаем информацию о пользователе
+            user = self.driver.users.get_user(user_id)
+            username = user.get('username', 'Неизвестный')
+            
+            # Удаляем упоминание бота из сообщения
+            cleaned_message = self._remove_bot_mention(message)
+            
+            # Обрабатываем команду
+            await self._handle_command(channel_id, cleaned_message, user_id, username, root_id)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки команды с упоминанием бота: {e}")
+    
+    async def _handle_channel_command(self, channel_id: str, message: str, user_id: str, root_id: str, post_id: str):
+        """Обработка команд в канале"""
+        try:
+            # Получаем информацию о пользователе
+            user = self.driver.users.get_user(user_id)
+            username = user.get('username', 'Неизвестный')
+            
+            # Обрабатываем команду
+            await self._handle_command(channel_id, message, user_id, username, root_id)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки команды в канале: {e}")
+    
+    def _remove_bot_mention(self, message: str) -> str:
+        """Убирает упоминание бота из сообщения"""
+        if not self.bot_username:
+            return message
+        
+        # Паттерны для удаления упоминаний
+        mention_patterns = [
+            f'@{self.bot_username}',
+            '@jora',
+            '@Жора',
+            '@project-monitor-bot',
+            '@project_monitor_bot'
+        ]
+        
+        cleaned = message
+        for pattern in mention_patterns:
+            cleaned = cleaned.replace(pattern, '')
+        
+        return cleaned.strip()
+    
+    async def _handle_command(self, channel_id: str, message: str, user_id: str, username: str, root_id: str = None):
+        """Обработка команд"""
+        try:
+            from bot_commands import command_handler
+            
+            # Получаем email пользователя
+            user = self.driver.users.get_user(user_id)
+            user_email = user.get('email', username)  # Используем email или username как fallback
+            
+            # Определяем тип канала
+            channel_type = 'D' if self._is_direct_message(channel_id) else 'O'
+            
+            # Получаем основную команду из алиаса
+            main_command = self._get_main_command(message)
+            
+            # Если команда не распознана, отправляем подсказки
+            if main_command == 'unknown':
+                await self._send_help_with_suggestions(channel_id, message)
+                return
+            
+            # Отладочная информация
+            logger.info(f"🔍 Отладка: message={message}, type={type(message)}")
+            
+            # Обрабатываем команду
+            response = command_handler.handle_message(
+                message, user_email, channel_type, channel_id, None, user_id
+            )
+            
+            if response:
+                # Отправляем ответ
+                if root_id:
+                    # Ответ в тред
+                    self.driver.posts.create_post({
+                        'channel_id': channel_id,
+                        'message': response,
+                        'root_id': root_id
+                    })
+                else:
+                    # Обычное сообщение
+                    self.driver.posts.create_post({
+                        'channel_id': channel_id,
+                        'message': response
+                    })
+                
+                logger.info(f"✅ Ответ отправлен пользователю {username}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки команды: {e}")
+    
+    async def _send_help_message(self, channel_id: str):
+        """Отправка справочного сообщения"""
+        try:
+            help_message = f"""
+🤖 **Привет! Я Project Monitor Bot**
+
+Я помогаю мониторить проекты в Jira и отслеживать превышение трудозатрат и просроченные сроки.
+
+**Основные команды:**
+• `help` / `справка` / `помощь` - показать эту справку
+• `setup_jira username password` / `настрой jira username password` - настроить подключение к Jira
+• `test_jira` / `проверь jira` / `тест jira` - проверить подключение к Jira
+• `list_projects` / `проекты` / `список проектов` - показать все доступные проекты в Jira
+• `subscribe PROJECT_KEY` / `подпиши на проект PROJECT_KEY` - подписаться на мониторинг проекта (в канале)
+• `list_subscriptions` / `подписки` / `список подписок` - показать активные подписки (в канале)
+• `run_subscriptions` / `проверь подписки` / `запусти проверку` - запустить проверку подписок (в канале)
+
+**Для начала работы:**
+1. **Добавьте бота в канал** (если еще не добавлен)
+2. Настройте подключение к Jira: `setup_jira your_username your_password`
+3. Проверьте подключение: `test_jira`
+4. В канале подпишитесь на проект: `@Jora subscribe PROJECT_KEY`
+
+**⚠️ Важно:** 
+• В каналах команды работают только с упоминанием бота: `@Jora команда`
+• Бот должен быть добавлен в канал перед выполнением команд
+
+**Примеры команд в канале:**
+• `@Jora подпиши на проект IDB`
+• `@Jora проверь подписки`
+• `@Jora подписки`
+
+**Безопасность:** Все пароли шифруются AES-256 + PBKDF2HMAC
+"""
+            
+            self.driver.posts.create_post({
+                'channel_id': channel_id,
+                'message': help_message
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки справки: {e}")
+    
+    async def _send_help_with_suggestions(self, channel_id: str, message: str):
+        """Отправка справки с подсказками по командам"""
+        try:
+            # Анализируем сообщение для подсказок
+            message_lower = message.lower().strip()
+            suggestions = []
+            
+            # Подсказки на основе ключевых слов
+            if any(word in message_lower for word in ['подписк', 'проект', 'монитор', 'отслеж']):
+                suggestions.append("💡 Попробуйте: `@Jora подпиши на проект IDB` или `@Jora subscribe IDB`")
+            elif any(word in message_lower for word in ['jira', 'настрой', 'подключ']):
+                suggestions.append("💡 Попробуйте: `@Jora настрой jira username password` или `@Jora setup_jira username password`")
+            elif any(word in message_lower for word in ['провер', 'тест', 'статус']):
+                suggestions.append("💡 Попробуйте: `@Jora проверь jira` или `@Jora test_jira`")
+            elif any(word in message_lower for word in ['список', 'подписк', 'что']):
+                suggestions.append("💡 Попробуйте: `@Jora подписки` или `@Jora list_subscriptions`")
+            elif any(word in message_lower for word in ['проект', 'доступн', 'какие', 'показать']):
+                suggestions.append("💡 Попробуйте: `@Jora проекты` или `@Jora list_projects` для просмотра всех проектов")
+            else:
+                suggestions.append("💡 Попробуйте: `@Jora проекты` для просмотра всех доступных проектов")
+                suggestions.append("💡 Или: `@Jora подпиши на проект IDB` для подписки на проект")
+                suggestions.append("💡 Или: `@Jora настрой jira username password` для настройки Jira")
+            
+            help_message = f"""
+🤖 **Привет! Я Project Monitor Bot**
+
+Я не понял вашу команду: `{message}`
+
+**Основные команды:**
+• `@Jora проекты` - показать все доступные проекты в Jira
+• `@Jora подпиши на проект IDB` - подписка на мониторинг проекта
+• `@Jora настрой jira username password` - настройка подключения к Jira
+• `@Jora проверь jira` - проверка подключения к Jira
+• `@Jora подписки` - показать активные подписки
+• `@Jora проверь подписки` - запустить проверку подписок
+
+**Подсказки:**
+{chr(10).join(suggestions)}
+
+**Для полной справки:** `@Jora help`
+"""
+            
+            self.driver.posts.create_post({
+                'channel_id': channel_id,
+                'message': help_message
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки справки с подсказками: {e}")
+    
+    def stop(self):
+        """Остановка клиента"""
+        logger.info("🛑 Остановка Mattermost клиента...")
+        self._running = False
+        
+        if self._websocket:
+            try:
+                asyncio.create_task(self._websocket.close())
+            except:
+                pass
+        
+        logger.info("✅ Mattermost клиент остановлен")
 
 # Глобальный экземпляр клиента (ленивая инициализация)
 _mattermost_client = None

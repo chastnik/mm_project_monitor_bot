@@ -17,6 +17,7 @@ class BotCommandHandler:
             'subscribe': self.cmd_subscribe,
             'unsubscribe': self.cmd_unsubscribe,
             'list_subscriptions': self.cmd_list_subscriptions,
+            'list_projects': self.cmd_list_projects,
             'setup_jira': self.cmd_setup_jira,
             'test_jira': self.cmd_test_jira,
             'change_password': self.cmd_change_password,
@@ -37,8 +38,17 @@ class BotCommandHandler:
         if not message_text.strip():
             return None
         
-        # Убираем упоминания бота если есть
-        message_text = re.sub(r'@\w+\s*', '', message_text).strip()
+        # Отладочная информация
+        logger.info(f"🔍 bot_commands: message_text={message_text}, type={type(message_text)}")
+        
+        # Проверяем тип message_text
+        if isinstance(message_text, list):
+            logger.info(f"🔍 Преобразуем список в строку: {message_text}")
+            message_text = ' '.join(message_text)
+            logger.info(f"🔍 Результат: {message_text}, type={type(message_text)}")
+        
+        # Убираем упоминания бота если есть (поддерживаем кириллицу)
+        message_text = re.sub(r'@[а-яё\w]+\s*', '', message_text, flags=re.IGNORECASE).strip()
         
         # Парсим команду
         parts = message_text.split()
@@ -47,6 +57,70 @@ class BotCommandHandler:
         
         command = parts[0].lower()
         args = parts[1:] if len(parts) > 1 else []
+        
+        # Маппинг алиасов команд
+        command_aliases = {
+            'help': 'help',
+            'справка': 'help',
+            'помощь': 'help',
+            'хелп': 'help',
+            'команды': 'help',
+            'что умеешь': 'help',
+            'subscribe': 'subscribe',
+            'подписка': 'subscribe',
+            'подпиши': 'subscribe',
+            'подпиши на проект': 'subscribe',
+            'проект': 'subscribe',
+            'мониторить': 'subscribe',
+            'отслеживать': 'subscribe',
+            'unsubscribe': 'unsubscribe',
+            'отписка': 'unsubscribe',
+            'отпиши': 'unsubscribe',
+            'отпиши от проекта': 'unsubscribe',
+            'не мониторить': 'unsubscribe',
+            'не отслеживать': 'unsubscribe',
+            'list_subscriptions': 'list_subscriptions',
+            'подписки': 'list_subscriptions',
+            'список подписок': 'list_subscriptions',
+            'мои подписки': 'list_subscriptions',
+            'что отслеживаешь': 'list_subscriptions',
+            'list_projects': 'list_projects',
+            'проекты': 'list_projects',
+            'список проектов': 'list_projects',
+            'все проекты': 'list_projects',
+            'доступные проекты': 'list_projects',
+            'показать проекты': 'list_projects',
+            'какие проекты': 'list_projects',
+            'setup_jira': 'setup_jira',
+            'настрой jira': 'setup_jira',
+            'настрой подключение': 'setup_jira',
+            'jira настройка': 'setup_jira',
+            'test_jira': 'test_jira',
+            'проверь jira': 'test_jira',
+            'тест jira': 'test_jira',
+            'проверь подключение': 'test_jira',
+            'change_password': 'change_password',
+            'смени пароль': 'change_password',
+            'измени пароль': 'change_password',
+            'новый пароль': 'change_password',
+            'run_subscriptions': 'run_subscriptions',
+            'проверь': 'run_subscriptions',
+            'проверь подписки': 'run_subscriptions',
+            'запусти проверку': 'run_subscriptions',
+            'мониторинг': 'run_subscriptions',
+            'history': 'history',
+            'история': 'history',
+            'история уведомлений': 'history',
+            'что было': 'history',
+            'status': 'status',
+            'статус': 'status',
+            'как дела': 'status',
+            'что происходит': 'status'
+        }
+        
+        # Преобразуем алиас в основную команду
+        if command in command_aliases:
+            command = command_aliases[command]
         
         # Проверяем права доступа для админских команд
         admin_commands = ['monitor_now', 'all_subscriptions', 'delete_subscription']
@@ -76,9 +150,12 @@ class BotCommandHandler:
         help_text = """📋 **Команды бота мониторинга проектов**
 
 **Настройка подключения к Jira:**
-• `setup_jira` - настроить подключение к Jira (логин/пароль)
+• `setup_jira <username> <password>` - настроить подключение к Jira
 • `test_jira` - проверить подключение к Jira
-• `change_password` - изменить пароль для Jira
+• `change_password <new_password>` - изменить пароль для Jira
+
+**Просмотр проектов:**
+• `list_projects` - показать все доступные проекты в Jira
 
 **Управление подписками на проекты:**
 • `subscribe <PROJECT_KEY>` - подписать канал на мониторинг проекта
@@ -109,7 +186,8 @@ class BotCommandHandler:
 """
         
         help_text += """**Примеры использования:**
-• `setup_jira` - настроить подключение к Jira
+• `setup_jira myuser mypassword` - настроить подключение к Jira
+• `list_projects` - посмотреть все доступные проекты
 • `subscribe MYPROJ` - подписаться на мониторинг проекта MYPROJ
 • `test_jira` - проверить подключение
 
@@ -202,13 +280,58 @@ class BotCommandHandler:
         
         result = f"📋 **Активные подписки в канале ({len(subscriptions)}):**\n\n"
         
-        for project_key, project_name, subscribed_by, created_at in subscriptions:
+        for project_key, project_name, subscribed_by, created_at, active in subscriptions:
             result += f"• **{project_key}** - {project_name}\n"
             result += f"  _Подписал: {subscribed_by}, {created_at[:10]}_\n\n"
         
         result += "Для отписки используйте: `unsubscribe PROJECT_KEY`"
         
         return result
+    
+    def cmd_list_projects(self, args: List[str], user_email: str, user_id: str = None) -> str:
+        """Показать все доступные проекты в Jira"""
+        try:
+            from user_jira_client import user_jira_client
+            
+            # Получаем клиент Jira для пользователя
+            jira_client = user_jira_client.get_jira_client(user_email)
+            if not jira_client:
+                return """❌ **Не удалось подключиться к Jira**
+
+Сначала настройте подключение командой: `setup_jira username password`"""
+            
+            # Получаем все проекты
+            projects = jira_client.projects()
+            
+            if not projects:
+                return "ℹ️ **Доступные проекты не найдены**"
+            
+            # Формируем список проектов
+            result = f"📋 **Доступные проекты в Jira ({len(projects)}):**\n\n"
+            
+            # Группируем проекты по первым буквам для удобства
+            projects_by_letter = {}
+            for project in projects:
+                first_letter = project.key[0].upper()
+                if first_letter not in projects_by_letter:
+                    projects_by_letter[first_letter] = []
+                projects_by_letter[first_letter].append(project)
+            
+            # Сортируем по ключам
+            for letter in sorted(projects_by_letter.keys()):
+                result += f"**{letter}:**\n"
+                for project in sorted(projects_by_letter[letter], key=lambda x: x.key):
+                    result += f"• `{project.key}` - {project.name}\n"
+                result += "\n"
+            
+            result += f"💡 **Для подписки на проект используйте:** `subscribe PROJECT_KEY`\n"
+            result += f"**Пример:** `subscribe {projects[0].key}`"
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения списка проектов: {e}")
+            return f"❌ **Ошибка получения проектов:** {str(e)}"
     
     def cmd_setup_jira(self, args: List[str], user_email: str, user_id: str = None) -> str:
         """Настроить подключение к Jira"""
