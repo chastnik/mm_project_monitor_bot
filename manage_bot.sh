@@ -129,7 +129,7 @@ show_logs() {
     local lines="${1:-50}"
     print_header "Логи (последние $lines строк)"
     
-    local log_file="$SCRIPT_DIR/bot.log"
+    local log_file="$SCRIPT_DIR/standup_bot.log"
     
     if [ -f "$log_file" ]; then
         tail -n "$lines" "$log_file"
@@ -149,7 +149,7 @@ show_logs() {
 tail_logs() {
     print_header "Слежение за логами"
     
-    local log_file="$SCRIPT_DIR/bot.log"
+    local log_file="$SCRIPT_DIR/standup_bot.log"
     
     if [ -f "$log_file" ]; then
         print_info "Нажмите Ctrl+C для выхода"
@@ -271,11 +271,11 @@ cleanup() {
     done
     
     # Очищаем старые логи
-    if [ -f "$SCRIPT_DIR/bot.log" ]; then
-        local log_size=$(stat -f%z "$SCRIPT_DIR/bot.log" 2>/dev/null || stat -c%s "$SCRIPT_DIR/bot.log" 2>/dev/null || echo 0)
+    if [ -f "$SCRIPT_DIR/standup_bot.log" ]; then
+        local log_size=$(stat -f%z "$SCRIPT_DIR/standup_bot.log" 2>/dev/null || stat -c%s "$SCRIPT_DIR/standup_bot.log" 2>/dev/null || echo 0)
         if [ "$log_size" -gt 10485760 ]; then  # 10MB
-            tail -1000 "$SCRIPT_DIR/bot.log" > "$SCRIPT_DIR/bot.log.tmp"
-            mv "$SCRIPT_DIR/bot.log.tmp" "$SCRIPT_DIR/bot.log"
+            tail -1000 "$SCRIPT_DIR/standup_bot.log" > "$SCRIPT_DIR/standup_bot.log.tmp"
+            mv "$SCRIPT_DIR/standup_bot.log.tmp" "$SCRIPT_DIR/standup_bot.log"
             print_info "Лог файл обрезан (оставлены последние 1000 строк)"
             cleaned=$((cleaned + 1))
         fi
