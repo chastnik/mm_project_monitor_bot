@@ -51,8 +51,8 @@ nano .env
 ./manage_bot.sh start
 
 # Или через systemd (если настроен)
-sudo systemctl start project-monitor-bot
-sudo systemctl enable project-monitor-bot
+sudo systemctl start standup-bot
+sudo systemctl enable standup-bot
 ```
 
 ### 4. Настройте персональные подключения к Jira
@@ -205,7 +205,7 @@ setup_jira username new_password
 2. Перейдите в **System Console** → **Integrations** → **Bot Accounts**
 3. Нажмите **Create Bot Account**
 4. Заполните поля:
-   - **Username**: `project-monitor-bot`
+   - **Username**: `standup-bot`
    - **Display Name**: `Project Monitor Bot`
    - **Description**: `Бот для мониторинга проектов в Jira`
 5. Скопируйте **Access Token** - это значение для `MATTERMOST_TOKEN`
@@ -238,7 +238,7 @@ JIRA_VERIFY_SSL=false
 # Настройки Mattermost
 MATTERMOST_URL=https://your-mattermost-server.com
 MATTERMOST_TOKEN=your_bot_token_here
-MATTERMOST_USERNAME=project-monitor-bot
+MATTERMOST_USERNAME=standup-bot
 MATTERMOST_TEAM=your_team_name
 MATTERMOST_SSL_VERIFY=true
 # Канал для системных сообщений (ошибки, запуск, режим работы)
@@ -327,26 +327,26 @@ change_password new_password_here
 
 ```bash
 # Статус
-sudo systemctl status project-monitor-bot
+sudo systemctl status standup-bot
 
 # Запуск/остановка
-sudo systemctl start project-monitor-bot
-sudo systemctl stop project-monitor-bot
-sudo systemctl restart project-monitor-bot
+sudo systemctl start standup-bot
+sudo systemctl stop standup-bot
+sudo systemctl restart standup-bot
 
 # Автозапуск
-sudo systemctl enable project-monitor-bot
-sudo systemctl disable project-monitor-bot
+sudo systemctl enable standup-bot
+sudo systemctl disable standup-bot
 
 # Логи
-sudo journalctl -u project-monitor-bot -f
-sudo journalctl -u project-monitor-bot --since "1 hour ago"
+sudo journalctl -u standup-bot -f
+sudo journalctl -u standup-bot --since "1 hour ago"
 ```
 
 ## Логи
 
 Бот ведет логи в двух местах:
-- **systemd journal**: `sudo journalctl -u project-monitor-bot -f`
+- **systemd journal**: `sudo journalctl -u standup-bot -f`
 - **файл**: `standup_bot.log` в директории проекта
 
 ## Устранение неисправностей
@@ -387,10 +387,10 @@ LOG_LEVEL=DEBUG
 Полезные команды для диагностики:
 ```bash
 # Проверка статуса
-sudo systemctl status project-monitor-bot
+sudo systemctl status standup-bot
 
 # Детальные логи
-sudo journalctl -u project-monitor-bot -f --since "1 hour ago"
+sudo journalctl -u standup-bot -f --since "1 hour ago"
 
 # Тест подключений (используйте скрипт управления)
 ./manage_bot.sh test
