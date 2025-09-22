@@ -61,7 +61,7 @@ sudo systemctl enable standup-bot
 
 1. Напишите боту в личных сообщениях: `setup_jira <username> <password>`
 2. Проверьте подключение: `test_jira`
-3. Подпишитесь на проект в канале: `subscribe PROJECT_KEY`
+3. Подпишитесь на проект в канале: `@Jora subscribe PROJECT_KEY`
 
 ## Управление ботом
 
