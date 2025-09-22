@@ -31,8 +31,8 @@
 ### 1. Установка
 
 ```bash
-git clone https://github.com/chastnik/mm_standup_bot.git
-cd mm_standup_bot
+git clone https://github.com/chastnik/mm_project_monitor_bot.git
+cd mm_project_monitor_bot
 chmod +x install.sh
 ./install.sh
 ```
