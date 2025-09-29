@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class ProjectMonitor:
     def __init__(self):
-        self.closed_statuses = ['Done', 'Closed', 'Resolved', 'Выполнено', 'Закрыто']
+        self.closed_statuses = ['Done', 'Closed', 'Resolved', 'Выполнено', 'Закрыто', 'Готово']
         
     def monitor_all_projects(self):
         """Мониторинг всех активных проектов"""
