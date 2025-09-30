@@ -47,8 +47,22 @@ class BotCommandHandler:
             message_text = ' '.join(message_text)
             logger.info(f"🔍 Результат: {message_text}, type={type(message_text)}")
         
-        # Убираем упоминания бота если есть (поддерживаем кириллицу)
-        message_text = re.sub(r'@[а-яё\w]+\s*', '', message_text, flags=re.IGNORECASE).strip()
+        # Убираем упоминание бота только в каналах и ТОЛЬКО в начале сообщения,
+        # чтобы не ломать пароли/аргументы, начинающиеся с символа '@'
+        if channel_type != 'D':
+            bot_names = []
+            try:
+                if getattr(mattermost_client, 'bot_username', None):
+                    bot_names.append(mattermost_client.bot_username)
+            except Exception:
+                pass
+            # Добавляем общеизвестные варианты имен бота
+            bot_names.extend(['jora', 'Жора', 'project-monitor-bot', 'project_monitor_bot'])
+            # Формируем паттерн: начальное упоминание любого из имен
+            escaped = [re.escape(name) for name in bot_names if name]
+            if escaped:
+                pattern = r'^\s*@(' + '|'.join(escaped) + r')\b\s*'
+                message_text = re.sub(pattern, '', message_text, flags=re.IGNORECASE).strip()
         
         # Парсим команду
         parts = message_text.split()
@@ -95,6 +109,8 @@ class BotCommandHandler:
             'настрой jira': 'setup_jira',
             'настрой подключение': 'setup_jira',
             'jira настройка': 'setup_jira',
+            'настрой джира': 'setup_jira',
+            'настрой джиру': 'setup_jira',
             'test_jira': 'test_jira',
             'проверь jira': 'test_jira',
             'тест jira': 'test_jira',
@@ -119,8 +135,20 @@ class BotCommandHandler:
         }
         
         # Преобразуем алиас в основную команду
-        if command in command_aliases:
-            command = command_aliases[command]
+        # 1) Пробуем 3-словный, 2-словный алиасы, затем одно слово
+        multi_keys = []
+        if len(parts) >= 3:
+            multi_keys.append((parts[0] + ' ' + parts[1] + ' ' + parts[2]).lower())
+        if len(parts) >= 2:
+            multi_keys.append((parts[0] + ' ' + parts[1]).lower())
+        multi_keys.append(command)
+        for key in multi_keys:
+            if key in command_aliases:
+                command = command_aliases[key]
+                # Пересчитаем args, убрав количество слов, занятых алиасом
+                consumed = len(key.split())
+                args = parts[consumed:]
+                break
         
         # Проверяем права доступа для админских команд
         admin_commands = ['monitor_now', 'all_subscriptions', 'delete_subscription']
