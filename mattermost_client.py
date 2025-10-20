@@ -359,10 +359,25 @@ class MattermostClient:
             f'@Жора',  # Отображаемое имя в канале
             f'@project-monitor-bot',  # Полное имя
             f'@project_monitor_bot',  # Альтернативное имя
+            f'@ask',   # Тестовый бот
         ]
         
         message_lower = message.lower()
-        return any(mention in message_lower for mention in mention_patterns)
+        # Проверяем точные упоминания и частичные совпадения
+        for pattern in mention_patterns:
+            if pattern.lower() in message_lower:
+                logger.info(f"🔍 Найдено упоминание бота: '{pattern}' в сообщении: '{message}'")
+                return True
+        
+        # Дополнительная проверка: ищем любые упоминания @username
+        import re
+        mentions = re.findall(r'@(\w+)', message)
+        for mention in mentions:
+            if mention.lower() in ['jora', 'жора', 'ask', self.bot_username.lower()]:
+                logger.info(f"🔍 Найдено упоминание через regex: '@{mention}' в сообщении: '{message}'")
+                return True
+        
+        return False
     
     def _is_command(self, message: str) -> bool:
         """Проверяет, является ли сообщение командой"""
