@@ -527,6 +527,9 @@ class MattermostClient:
                 message, user_email, channel_type, channel_id, None, user_id
             )
             
+            # Отладочная информация о ответе команды
+            logger.info(f"🔍 Ответ команды: {response}, тип: {type(response)}")
+            
             if response:
                 # Отправляем ответ
                 if root_id:
