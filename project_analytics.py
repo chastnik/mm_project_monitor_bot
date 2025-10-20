@@ -50,6 +50,10 @@ class ProjectAnalytics:
         closed_per_month: Dict[str, int] = {}
         six_months_ago = (today.replace(day=1) - timedelta(days=180)).replace(day=1)
 
+        assignee_total: Dict[str, int] = {}
+        assignee_open: Dict[str, int] = {}
+        type_counts: Dict[str, int] = {}
+
         for issue in issues:
             fields = issue.fields
 
@@ -57,6 +61,19 @@ class ProjectAnalytics:
             is_closed = status_name in closed_statuses
             if is_closed:
                 closed += 1
+            # Исполнители: считаем всего и активные
+            assignee_name = None
+            if getattr(fields, 'assignee', None):
+                assignee_name = getattr(fields.assignee, 'displayName', None) or 'Не назначен'
+            else:
+                assignee_name = 'Не назначен'
+            assignee_total[assignee_name] = assignee_total.get(assignee_name, 0) + 1
+            if not is_closed:
+                assignee_open[assignee_name] = assignee_open.get(assignee_name, 0) + 1
+
+            # Тип задачи
+            issue_type = getattr(getattr(fields, 'issuetype', None), 'name', 'Unknown') or 'Unknown'
+            type_counts[issue_type] = type_counts.get(issue_type, 0) + 1
 
             # Оценка и факт (секунды -> часы)
             orig = (getattr(fields, 'timeoriginalestimate', 0) or 0) / 3600.0
@@ -155,12 +172,21 @@ class ProjectAnalytics:
         if open_overdue_top:
             lines.append(f"• Больше всего просрочек: {open_overdue_top[0]} ({open_overdue_top[1]})")
 
+        # Блок по исполнителям
+        lines.append("")
+        lines.append("👥 **Исполнители (всего / активные):**")
+        # Сортировка по общему числу задач по убыванию
+        for name in sorted(assignee_total.keys(), key=lambda k: assignee_total[k], reverse=True):
+            total_cnt = assignee_total.get(name, 0)
+            open_cnt = assignee_open.get(name, 0)
+            lines.append(f"• {name}: {total_cnt} / {open_cnt}")
+
         report_text = "\n".join(lines)
 
         # Рисуем графики: scatter и created vs closed за 6 мес
         image_path = None
         try:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
             # Scatter: оценка vs факт
             axes[0].scatter(points_x, points_y, alpha=0.6, s=20)
@@ -189,6 +215,17 @@ class ProjectAnalytics:
             axes[1].set_xticks(x)
             axes[1].set_xticklabels(months, rotation=45, ha='right')
             axes[1].legend()
+
+            # Pie: распределение по типам задач
+            if type_counts:
+                labels = list(type_counts.keys())
+                sizes = list(type_counts.values())
+                axes[2].pie(sizes, labels=labels, autopct='%1.0f%%', startangle=140)
+                axes[2].axis('equal')
+                axes[2].set_title('Типы задач')
+            else:
+                axes[2].text(0.5, 0.5, 'Нет данных по типам', ha='center', va='center')
+                axes[2].set_axis_off()
 
             plt.tight_layout()
 
