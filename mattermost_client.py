@@ -544,50 +544,6 @@ class MattermostClient:
                     })
                 
                 logger.info(f"✅ Ответ отправлен пользователю {username}")
-
-            # Если запрошена аналитика, попробуем дополнительно отправить изображение
-            try:
-                msg_lower = message.lower()
-                if any(alias in msg_lower for alias in ['analytics', 'аналитика', 'аналитика проекта', 'покажи аналитику']):
-                    # Аккуратно извлекаем PROJECT_KEY через регэксп
-                    cleaned = self._remove_bot_mention(message)
-                    patterns = [
-                        r"(?:аналитика\s+проекта|аналитика|analytics)\s+([A-Za-z0-9_-]+)",
-                    ]
-                    project_key = None
-                    for pattern in patterns:
-                        m = re.search(pattern, cleaned, flags=re.IGNORECASE)
-                        if m:
-                            project_key = m.group(1).upper()
-                            break
-
-                    # Фолбэк: берем последний подходящий токен и отбрасываем служебные слова
-                    if not project_key:
-                        tokens = [t for t in re.split(r"\s+", cleaned.strip()) if t]
-                        service = {'аналитика', 'проекта', 'analytics', 'покажи', 'покажи_аналитику'}
-                        candidates = []
-                        for t in tokens:
-                            t_clean = t.strip().strip('.,;:!()[]{}')
-                            if not t_clean:
-                                continue
-                            low = t_clean.lower()
-                            if low in service:
-                                continue
-                            if re.match(r'^[A-Za-z0-9_-]{2,}$', t_clean):
-                                candidates.append(t_clean.upper())
-                        if candidates:
-                            project_key = candidates[-1]
-                    logger.info(f"🔎 Извлечен ключ проекта для аналитики: {project_key}")
-
-                    if project_key:
-                        from project_analytics import ProjectAnalytics
-                        analytics = ProjectAnalytics()
-                        # user_email уже определен выше
-                        report, image_path = analytics.build_project_analytics(user_email, project_key)
-                        if image_path:
-                            self.upload_image(channel_id, image_path, message='Графики по проекту')
-            except Exception as e:
-                logger.error(f"Ошибка отправки изображения аналитики: {e}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки команды: {e}")

@@ -176,7 +176,7 @@ class BotCommandHandler:
         else:
             return self.cmd_help([], user_email)
 
-    def cmd_analytics(self, args: List[str], user_email: str) -> str:
+    def cmd_analytics(self, args: List[str], user_email: str, channel_id: str = None, user_id: str = None) -> str:
         """Показать расширенную аналитику проекта в Jira"""
         if not args:
             return "❌ Укажите ключ проекта: `аналитика PROJECT_KEY` или `analytics PROJECT_KEY`"
@@ -201,22 +201,30 @@ class BotCommandHandler:
 
 Сначала настройте подключение командой: `setup_jira <username> <password>`"""
 
+        if not channel_id:
+            return "❌ Команда доступна только в каналах или личных сообщениях с ботом"
+
         try:
-            from project_analytics import ProjectAnalytics
+            from project_analytics import project_analytics_service
             from mattermost_client import mattermost_client
 
-            # В рантайме Mattermost передает channel_id только для некоторых команд,
-            # поэтому вернем текст, а отправку графика сделаем в вызывающей стороне, если нужно.
+            # Получаем аналитику и путь к изображению
+            report_text, image_path = project_analytics_service.get_project_analytics(user_email, project_key)
 
-            analytics = ProjectAnalytics()
-            report, image_path = analytics.build_project_analytics(user_email, project_key)
+            if report_text:
+                # Отправляем текстовый отчет
+                mattermost_client.send_channel_message(channel_id, report_text)
 
-            # Текстовый отчет вернем как ответ команды
-            # Картинку отправлять будем там, где известен channel_id (в WebSocket обработчике)
-            return report if report else f"ℹ️ Нет данных по проекту {project_key}"
+                # Отправляем изображение, если оно было создано
+                if image_path:
+                    mattermost_client.upload_image(channel_id, image_path, f"📊 Аналитика проекта {project_key}", root_id=None)
+                return None # Сообщение уже отправлено через send_channel_message и upload_image
+            else:
+                return f"❌ Не удалось получить аналитику для проекта {project_key}. Проверьте ключ проекта и ваше подключение к Jira."
+
         except Exception as e:
-            logger.error(f"Ошибка построения аналитики для {project_key}: {e}")
-            return f"❌ Ошибка построения аналитики: {str(e)}"
+            logger.error(f"Ошибка выполнения команды аналитики для проекта {project_key}: {e}")
+            return f"❌ Ошибка при получении аналитики проекта: {str(e)}"
     
     def cmd_help(self, args: List[str], user_email: str) -> str:
         """Показать справку по командам"""
