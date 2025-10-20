@@ -212,7 +212,7 @@ class BotCommandHandler:
 
             # Получаем аналитику и путь к изображению
             analytics = ProjectAnalytics()
-            report_text, image_path = analytics.get_project_analytics(user_email, project_key)
+            report_text, image_path = analytics.build_project_analytics(user_email, project_key)
 
             if report_text:
                 # Отправляем текстовый отчет
