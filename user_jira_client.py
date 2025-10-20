@@ -117,7 +117,7 @@ class UserJiraClient:
             issues = jira_client.search_issues(
                 jql, 
                 maxResults=max_results,
-                expand='changelog'
+                expand='changelog,worklog'
             )
             return issues
         except Exception as e:

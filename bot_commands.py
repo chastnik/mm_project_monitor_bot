@@ -27,6 +27,7 @@ class BotCommandHandler:
             'delete_subscription': self.cmd_delete_subscription,
             'history': self.cmd_history,
             'status': self.cmd_status,
+            'analytics': self.cmd_analytics,
         }
     
     def handle_message(self, message_text: str, user_email: str, channel_type: str = 'D', 
@@ -131,7 +132,11 @@ class BotCommandHandler:
             'status': 'status',
             'статус': 'status',
             'как дела': 'status',
-            'что происходит': 'status'
+            'что происходит': 'status',
+            'analytics': 'analytics',
+            'аналитика': 'analytics',
+            'аналитика проекта': 'analytics',
+            'покажи аналитику': 'analytics'
         }
         
         # Преобразуем алиас в основную команду
@@ -170,6 +175,48 @@ class BotCommandHandler:
                 return f"❌ Ошибка выполнения команды: {str(e)}"
         else:
             return self.cmd_help([], user_email)
+
+    def cmd_analytics(self, args: List[str], user_email: str) -> str:
+        """Показать расширенную аналитику проекта в Jira"""
+        if not args:
+            return "❌ Укажите ключ проекта: `аналитика PROJECT_KEY` или `analytics PROJECT_KEY`"
+        # Нормализуем: пропустим служебные слова и возьмём последний валидный токен
+        import re
+        tokens = [t for t in args if t and t.strip()]
+        if tokens and tokens[0].lower() in ['проекта', 'project', 'проекта:', 'project:']:
+            tokens = tokens[1:]
+        # Ищем последний токен похожий на ключ (буквы/цифры/_/-)
+        project_key = None
+        for t in reversed(tokens):
+            if re.match(r'^[A-Za-zА-Яа-я0-9_-]+$', t):
+                project_key = t.upper()
+                break
+        if not project_key:
+            return "❌ Не удалось распознать ключ проекта. Пример: `аналитика IDB`"
+
+        # Проверяем настройки Jira пользователя
+        settings = db_manager.get_user_jira_settings(user_email)
+        if not settings:
+            return """❌ **Настройки Jira не найдены**
+
+Сначала настройте подключение командой: `setup_jira <username> <password>`"""
+
+        try:
+            from project_analytics import ProjectAnalytics
+            from mattermost_client import mattermost_client
+
+            # В рантайме Mattermost передает channel_id только для некоторых команд,
+            # поэтому вернем текст, а отправку графика сделаем в вызывающей стороне, если нужно.
+
+            analytics = ProjectAnalytics()
+            report, image_path = analytics.build_project_analytics(user_email, project_key)
+
+            # Текстовый отчет вернем как ответ команды
+            # Картинку отправлять будем там, где известен channel_id (в WebSocket обработчике)
+            return report if report else f"ℹ️ Нет данных по проекту {project_key}"
+        except Exception as e:
+            logger.error(f"Ошибка построения аналитики для {project_key}: {e}")
+            return f"❌ Ошибка построения аналитики: {str(e)}"
     
     def cmd_help(self, args: List[str], user_email: str) -> str:
         """Показать справку по командам"""
@@ -197,6 +244,7 @@ class BotCommandHandler:
 
 **Информационные команды:**
 • `help` - показать эту справку
+• `analytics PROJECT_KEY` / `аналитика PROJECT_KEY` - расширенная аналитика проекта (с графиками)
 
 """
         

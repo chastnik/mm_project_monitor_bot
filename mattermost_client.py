@@ -2,6 +2,7 @@
 Упрощенный клиент для работы с Mattermost API по образцу mm_bot_summary
 """
 import logging
+import re
 import asyncio
 import json
 import websockets
@@ -105,6 +106,65 @@ class MattermostClient:
         except Exception as e:
             logger.warning(f"Пользователь с email {email} не найден: {e}")
             return None
+
+    def upload_image(self, channel_id: str, file_path: str, message: str = "", root_id: str = None) -> bool:
+        """Загрузить изображение в канал и опубликовать пост с файлом"""
+        try:
+            import os
+            filename = file_path.split('/')[-1]
+            if not os.path.exists(file_path):
+                logger.error(f"Файл для загрузки не найден: {file_path}")
+                return False
+            with open(file_path, 'rb') as f:
+                data = f.read()
+
+            # Пробуем разные варианты параметров в зависимости от версии драйвера
+            upload_result = None
+            try:
+                upload_result = self.driver.files.upload_file(
+                    channel_id=channel_id,
+                    files={'files': (filename, data)}
+                )
+            except Exception as e1:
+                logger.warning(f"upload_file(variant1) ошибка: {e1}")
+                try:
+                    upload_result = self.driver.files.upload_file(
+                        channel_id=channel_id,
+                        files={'files': (filename, data, 'image/jpeg')}
+                    )
+                except Exception as e2:
+                    logger.error(f"upload_file(variant2) ошибка: {e2}")
+                    return False
+
+            file_ids = []
+            if isinstance(upload_result, dict):
+                # Новые версии возвращают объект с file_infos
+                if 'file_infos' in upload_result and upload_result['file_infos']:
+                    file_ids = [fi['id'] for fi in upload_result['file_infos']]
+                # Старые версии могли возвращать file_id напрямую
+                if 'id' in upload_result:
+                    file_ids.append(upload_result['id'])
+            else:
+                logger.warning(f"Неизвестный формат ответа upload_file: {type(upload_result)}")
+
+            if not file_ids:
+                logger.error("Не удалось получить file_ids после загрузки изображения")
+                return False
+
+            post_data = {
+                'channel_id': channel_id,
+                'message': message or '',
+                'file_ids': file_ids
+            }
+            if root_id:
+                post_data['root_id'] = root_id
+
+            self.driver.posts.create_post(post_data)
+            logger.info(f"Изображение {filename} отправлено в канал {channel_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка загрузки изображения в канал {channel_id}: {e}")
+            return False
     
     def is_user_admin(self, user_email: str) -> bool:
         """Проверить, является ли пользователь администратором"""
@@ -320,7 +380,8 @@ class MattermostClient:
             'test_jira': ['test_jira', 'проверь jira', 'тест jira', 'проверь подключение'],
             'change_password': ['change_password', 'смени пароль', 'измени пароль', 'новый пароль'],
             'history': ['history', 'история', 'история уведомлений', 'что было'],
-            'status': ['status', 'статус', 'как дела', 'что происходит']
+            'status': ['status', 'статус', 'как дела', 'что происходит'],
+            'analytics': ['analytics', 'аналитика', 'аналитика проекта', 'покажи аналитику']
         }
         
         # Проверяем все алиасы команд
@@ -345,7 +406,8 @@ class MattermostClient:
             'test_jira': ['test_jira', 'проверь jira', 'тест jira', 'проверь подключение'],
             'change_password': ['change_password', 'смени пароль', 'измени пароль', 'новый пароль'],
             'history': ['history', 'история', 'история уведомлений', 'что было'],
-            'status': ['status', 'статус', 'как дела', 'что происходит']
+            'status': ['status', 'статус', 'как дела', 'что происходит'],
+            'analytics': ['analytics', 'аналитика', 'аналитика проекта', 'покажи аналитику']
         }
         
         for command, aliases in command_aliases.items():
@@ -467,6 +529,50 @@ class MattermostClient:
                     })
                 
                 logger.info(f"✅ Ответ отправлен пользователю {username}")
+
+            # Если запрошена аналитика, попробуем дополнительно отправить изображение
+            try:
+                msg_lower = message.lower()
+                if any(alias in msg_lower for alias in ['analytics', 'аналитика', 'аналитика проекта', 'покажи аналитику']):
+                    # Аккуратно извлекаем PROJECT_KEY через регэксп
+                    cleaned = self._remove_bot_mention(message)
+                    patterns = [
+                        r"(?:аналитика\s+проекта|аналитика|analytics)\s+([A-Za-z0-9_-]+)",
+                    ]
+                    project_key = None
+                    for pattern in patterns:
+                        m = re.search(pattern, cleaned, flags=re.IGNORECASE)
+                        if m:
+                            project_key = m.group(1).upper()
+                            break
+
+                    # Фолбэк: берем последний подходящий токен и отбрасываем служебные слова
+                    if not project_key:
+                        tokens = [t for t in re.split(r"\s+", cleaned.strip()) if t]
+                        service = {'аналитика', 'проекта', 'analytics', 'покажи', 'покажи_аналитику'}
+                        candidates = []
+                        for t in tokens:
+                            t_clean = t.strip().strip('.,;:!()[]{}')
+                            if not t_clean:
+                                continue
+                            low = t_clean.lower()
+                            if low in service:
+                                continue
+                            if re.match(r'^[A-Za-z0-9_-]{2,}$', t_clean):
+                                candidates.append(t_clean.upper())
+                        if candidates:
+                            project_key = candidates[-1]
+                    logger.info(f"🔎 Извлечен ключ проекта для аналитики: {project_key}")
+
+                    if project_key:
+                        from project_analytics import ProjectAnalytics
+                        analytics = ProjectAnalytics()
+                        # user_email уже определен выше
+                        report, image_path = analytics.build_project_analytics(user_email, project_key)
+                        if image_path:
+                            self.upload_image(channel_id, image_path, message='Графики по проекту')
+            except Exception as e:
+                logger.error(f"Ошибка отправки изображения аналитики: {e}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки команды: {e}")
