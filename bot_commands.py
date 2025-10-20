@@ -168,6 +168,8 @@ class BotCommandHandler:
                     return self.commands[command](args, user_email, channel_id, team_id, user_id)
                 elif command in ['setup_jira', 'test_jira', 'change_password']:
                     return self.commands[command](args, user_email, user_id)
+                elif command == 'analytics':
+                    return self.commands[command](args, user_email, channel_id, user_id)
                 else:
                     return self.commands[command](args, user_email)
             except Exception as e:
