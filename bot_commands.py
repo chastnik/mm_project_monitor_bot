@@ -207,11 +207,12 @@ class BotCommandHandler:
             return "❌ Команда доступна только в каналах или личных сообщениях с ботом"
 
         try:
-            from project_analytics import project_analytics_service
+            from project_analytics import ProjectAnalytics
             from mattermost_client import mattermost_client
 
             # Получаем аналитику и путь к изображению
-            report_text, image_path = project_analytics_service.get_project_analytics(user_email, project_key)
+            analytics = ProjectAnalytics()
+            report_text, image_path = analytics.get_project_analytics(user_email, project_key)
 
             if report_text:
                 # Отправляем текстовый отчет
