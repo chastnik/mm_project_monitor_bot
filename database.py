@@ -32,10 +32,35 @@ class DatabaseManager:
                         jira_password TEXT NOT NULL,
                         last_test_success BOOLEAN DEFAULT 0,
                         last_test_at TIMESTAMP,
+                        connection_attempts INTEGER DEFAULT 0,
+                        is_blocked BOOLEAN DEFAULT 0,
+                        blocked_at TIMESTAMP,
+                        last_connection_error TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
+                
+                # Добавляем новые поля, если таблица уже существует (миграция)
+                try:
+                    cursor.execute('ALTER TABLE user_jira_settings ADD COLUMN connection_attempts INTEGER DEFAULT 0')
+                except sqlite3.OperationalError:
+                    pass  # Колонка уже существует
+                
+                try:
+                    cursor.execute('ALTER TABLE user_jira_settings ADD COLUMN is_blocked BOOLEAN DEFAULT 0')
+                except sqlite3.OperationalError:
+                    pass  # Колонка уже существует
+                
+                try:
+                    cursor.execute('ALTER TABLE user_jira_settings ADD COLUMN blocked_at TIMESTAMP')
+                except sqlite3.OperationalError:
+                    pass  # Колонка уже существует
+                
+                try:
+                    cursor.execute('ALTER TABLE user_jira_settings ADD COLUMN last_connection_error TEXT')
+                except sqlite3.OperationalError:
+                    pass  # Колонка уже существует
                 
                 # Таблица подписок на проекты
                 cursor.execute('''
@@ -150,13 +175,29 @@ class DatabaseManager:
             
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT OR REPLACE INTO user_jira_settings 
-                    (user_email, user_id, jira_username, jira_password, updated_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (user_email, user_id, jira_username, encrypted_password))
+                # Проверяем, существует ли уже запись для этого пользователя
+                cursor.execute('SELECT id FROM user_jira_settings WHERE user_email = ?', (user_email,))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Обновляем существующую запись и сбрасываем счетчик попыток
+                    cursor.execute('''
+                        UPDATE user_jira_settings 
+                        SET user_id = ?, jira_username = ?, jira_password = ?, 
+                            connection_attempts = 0, is_blocked = 0, 
+                            blocked_at = NULL, last_connection_error = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_email = ?
+                    ''', (user_id, jira_username, encrypted_password, user_email))
+                else:
+                    # Создаем новую запись
+                    cursor.execute('''
+                        INSERT INTO user_jira_settings 
+                        (user_email, user_id, jira_username, jira_password, updated_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ''', (user_email, user_id, jira_username, encrypted_password))
                 conn.commit()
-                logger.info(f"Настройки Jira сохранены для пользователя {user_email} (пароль зашифрован)")
+                logger.info(f"Настройки Jira сохранены для пользователя {user_email} (пароль зашифрован, счетчик попыток сброшен)")
                 return True
         except Exception as e:
             logger.error(f"Ошибка сохранения настроек Jira для {user_email}: {e}")
@@ -216,16 +257,123 @@ class DatabaseManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE user_jira_settings 
-                    SET last_test_success = ?, last_test_at = CURRENT_TIMESTAMP
-                    WHERE user_email = ?
-                ''', (success, user_email))
+                if success:
+                    # При успешном подключении сбрасываем счетчик попыток и разблокируем
+                    cursor.execute('''
+                        UPDATE user_jira_settings 
+                        SET last_test_success = ?, last_test_at = CURRENT_TIMESTAMP,
+                            connection_attempts = 0, is_blocked = 0, blocked_at = NULL,
+                            last_connection_error = NULL
+                        WHERE user_email = ?
+                    ''', (success, user_email))
+                else:
+                    cursor.execute('''
+                        UPDATE user_jira_settings 
+                        SET last_test_success = ?, last_test_at = CURRENT_TIMESTAMP
+                        WHERE user_email = ?
+                    ''', (success, user_email))
                 conn.commit()
                 return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Ошибка обновления результата теста для {user_email}: {e}")
             return False
+    
+    def increment_connection_attempts(self, user_email: str, error_message: str = None) -> Tuple[int, bool]:
+        """Увеличить счетчик попыток подключения и проверить, нужно ли заблокировать"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Получаем текущее количество попыток
+                cursor.execute('''
+                    SELECT connection_attempts, is_blocked
+                    FROM user_jira_settings
+                    WHERE user_email = ?
+                ''', (user_email,))
+                result = cursor.fetchone()
+                
+                if not result:
+                    return 0, False
+                
+                current_attempts, is_blocked = result
+                
+                # Если уже заблокирован, не увеличиваем счетчик
+                if is_blocked:
+                    return current_attempts, True
+                
+                # Увеличиваем счетчик
+                new_attempts = current_attempts + 1
+                should_block = new_attempts >= 5
+                
+                if should_block:
+                    # Блокируем пользователя
+                    cursor.execute('''
+                        UPDATE user_jira_settings 
+                        SET connection_attempts = ?, is_blocked = 1, 
+                            blocked_at = CURRENT_TIMESTAMP,
+                            last_connection_error = ?
+                        WHERE user_email = ?
+                    ''', (new_attempts, error_message or "Превышено максимальное количество попыток", user_email))
+                else:
+                    # Просто увеличиваем счетчик
+                    cursor.execute('''
+                        UPDATE user_jira_settings 
+                        SET connection_attempts = ?, last_connection_error = ?
+                        WHERE user_email = ?
+                    ''', (new_attempts, error_message, user_email))
+                
+                conn.commit()
+                return new_attempts, should_block
+        except Exception as e:
+            logger.error(f"Ошибка обновления счетчика попыток для {user_email}: {e}")
+            return 0, False
+    
+    def reset_connection_attempts(self, user_email: str) -> bool:
+        """Сбросить счетчик попыток подключения (при смене пароля)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE user_jira_settings 
+                    SET connection_attempts = 0, is_blocked = 0, 
+                        blocked_at = NULL, last_connection_error = NULL
+                    WHERE user_email = ?
+                ''', (user_email,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка сброса счетчика попыток для {user_email}: {e}")
+            return False
+    
+    def is_user_blocked(self, user_email: str) -> bool:
+        """Проверить, заблокирован ли пользователь"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT is_blocked FROM user_jira_settings WHERE user_email = ?
+                ''', (user_email,))
+                result = cursor.fetchone()
+                return result[0] if result else False
+        except Exception as e:
+            logger.error(f"Ошибка проверки блокировки для {user_email}: {e}")
+            return False
+    
+    def get_user_block_info(self, user_email: str) -> Optional[Tuple[int, bool, Optional[str]]]:
+        """Получить информацию о блокировке пользователя: (попытки, заблокирован, дата блокировки)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT connection_attempts, is_blocked, blocked_at
+                    FROM user_jira_settings WHERE user_email = ?
+                ''', (user_email,))
+                result = cursor.fetchone()
+                if result:
+                    return (result[0], bool(result[1]), result[2])
+                return None
+        except Exception as e:
+            logger.error(f"Ошибка получения информации о блокировке для {user_email}: {e}")
+            return None
     
     def delete_user_jira_settings(self, user_email: str) -> bool:
         """Удалить настройки Jira пользователя"""

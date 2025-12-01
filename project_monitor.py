@@ -282,9 +282,13 @@ class ProjectMonitor:
                 original_estimate, time_spent, False  # для личного сообщения
             )
             
-            # Отправляем уведомления
-            mattermost_client.send_channel_message(channel_id, channel_message)
+            # Проверяем день недели - не отправляем в каналы в субботу и воскресенье
+            current_weekday = datetime.now().weekday()  # 0=понедельник, 6=воскресенье
+            if current_weekday < 5:  # Понедельник-пятница (0-4)
+                # Отправляем уведомления в канал только в рабочие дни
+                mattermost_client.send_channel_message(channel_id, channel_message)
             
+            # Личные сообщения отправляем всегда
             if assignee_email:
                 mattermost_client.send_direct_message_by_email(assignee_email, personal_message)
             
@@ -317,9 +321,13 @@ class ProjectMonitor:
                 issue.key, issue.fields.summary, assignee_name, due_date, False
             )
             
-            # Отправляем уведомления
-            mattermost_client.send_channel_message(channel_id, channel_message)
+            # Проверяем день недели - не отправляем в каналы в субботу и воскресенье
+            current_weekday = datetime.now().weekday()  # 0=понедельник, 6=воскресенье
+            if current_weekday < 5:  # Понедельник-пятница (0-4)
+                # Отправляем уведомления в канал только в рабочие дни
+                mattermost_client.send_channel_message(channel_id, channel_message)
             
+            # Личные сообщения отправляем всегда
             if assignee_email:
                 mattermost_client.send_direct_message_by_email(assignee_email, personal_message)
             

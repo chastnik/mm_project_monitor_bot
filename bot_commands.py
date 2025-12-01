@@ -387,8 +387,58 @@ class BotCommandHandler:
 
 Сначала настройте подключение командой: `setup_jira username password`"""
             
-            # Получаем все проекты
-            projects = jira_client.projects()
+            # Получаем все проекты без ограничений через прямой вызов API
+            # Jira API возвращает максимум 50 проектов за раз по умолчанию, поэтому используем пагинацию
+            all_projects = []
+            start_at = 0
+            max_results = 50
+            
+            # Простой класс для представления проекта
+            class Project:
+                def __init__(self, data):
+                    self.key = data.get('key', '')
+                    self.name = data.get('name', '')
+                    self.id = data.get('id', '')
+            
+            try:
+                while True:
+                    # Используем прямой вызов к REST API для получения всех проектов
+                    url = jira_client._options['server'] + '/rest/api/2/project'
+                    params = {
+                        'startAt': start_at,
+                        'maxResults': max_results,
+                        'expand': 'description,lead,url,projectKeys'
+                    }
+                    
+                    response = jira_client._session.get(url, params=params)
+                    response.raise_for_status()
+                    projects_data = response.json()
+                    
+                    if not projects_data:
+                        break
+                    
+                    # Преобразуем данные в объекты Project
+                    for project_data in projects_data:
+                        all_projects.append(Project(project_data))
+                    
+                    # Если получили меньше max_results, значит это последняя страница
+                    if len(projects_data) < max_results:
+                        break
+                    
+                    start_at += max_results
+                
+                projects = all_projects
+                logger.info(f"Получено {len(projects)} проектов через API с пагинацией")
+                
+            except Exception as api_error:
+                # Если прямой вызов API не сработал, используем стандартный метод
+                logger.warning(f"Не удалось получить все проекты через API, используем стандартный метод: {api_error}")
+                try:
+                    projects = list(jira_client.projects())
+                    logger.info(f"Получено {len(projects)} проектов через стандартный метод")
+                except Exception as e:
+                    logger.error(f"Ошибка получения проектов: {e}")
+                    return f"❌ **Ошибка получения списка проектов:** {str(e)}"
             
             if not projects:
                 return "ℹ️ **Доступные проекты не найдены**"
@@ -412,7 +462,8 @@ class BotCommandHandler:
                 result += "\n"
             
             result += f"💡 **Для подписки на проект используйте:** `subscribe PROJECT_KEY`\n"
-            result += f"**Пример:** `subscribe {projects[0].key}`"
+            if projects:
+                result += f"**Пример:** `subscribe {projects[0].key}`"
             
             return result
             

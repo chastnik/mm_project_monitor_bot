@@ -4,10 +4,18 @@
 import logging
 from typing import Optional, Tuple
 from jira import JIRA
+from jira.exceptions import JIRAError
 from config import config
 from database import db_manager
 
 logger = logging.getLogger(__name__)
+
+# Импортируем mattermost_client для отправки уведомлений
+try:
+    from mattermost_client import mattermost_client
+except ImportError:
+    mattermost_client = None
+    logger.warning("mattermost_client не доступен для отправки уведомлений")
 
 class UserJiraClient:
     def __init__(self, max_cache_size: int = 50):
@@ -23,6 +31,11 @@ class UserJiraClient:
             return None
         
         user_email = user_email.strip().lower()
+        
+        # Проверяем, не заблокирован ли пользователь
+        if db_manager.is_user_blocked(user_email):
+            logger.warning(f"Пользователь {user_email} заблокирован из-за превышения лимита попыток подключения")
+            return None
         
         # Проверяем кеш
         if user_email in self.jira_instances:
@@ -55,15 +68,71 @@ class UserJiraClient:
             # Кешируем подключение
             self._add_to_cache(user_email, jira_client)
             
-            # Обновляем результат теста
+            # Обновляем результат теста (сбрасывает счетчик попыток)
             db_manager.update_jira_test_result(user_email, True)
             
             return jira_client
             
-        except Exception as e:
-            logger.error(f"Ошибка подключения к Jira для {user_email}: {e}")
+        except JIRAError as e:
+            # Обрабатываем ошибки аутентификации Jira
+            error_message = str(e)
+            is_auth_error = (
+                e.status_code == 401 or 
+                'authentication' in error_message.lower() or
+                'unauthorized' in error_message.lower() or
+                'credentials' in error_message.lower()
+            )
+            
+            if is_auth_error:
+                logger.warning(f"Ошибка аутентификации для {user_email}: {error_message}")
+                # Увеличиваем счетчик попыток
+                attempts, was_blocked = db_manager.increment_connection_attempts(user_email, error_message)
+                
+                if was_blocked:
+                    # Отправляем уведомление пользователю о блокировке
+                    self._notify_user_about_block(user_email, attempts)
+                    logger.error(f"Пользователь {user_email} заблокирован после {attempts} неудачных попыток")
+                else:
+                    logger.warning(f"Неудачная попытка подключения для {user_email} (попытка {attempts}/5)")
+            else:
+                # Другие ошибки не считаем как попытки аутентификации
+                logger.error(f"Ошибка подключения к Jira для {user_email}: {error_message}")
+            
             db_manager.update_jira_test_result(user_email, False)
             return None
+            
+        except Exception as e:
+            # Обрабатываем другие исключения
+            error_message = str(e)
+            logger.error(f"Ошибка подключения к Jira для {user_email}: {error_message}")
+            db_manager.update_jira_test_result(user_email, False)
+            return None
+    
+    def _notify_user_about_block(self, user_email: str, attempts: int):
+        """Отправить уведомление пользователю о блокировке подключения"""
+        if not mattermost_client:
+            logger.warning("mattermost_client недоступен, не могу отправить уведомление")
+            return
+        
+        try:
+            message = f"""🔒 **Подключение к Jira заблокировано**
+
+Ваше подключение к Jira было заблокировано после {attempts} неудачных попыток подключения.
+
+**Причина:** Пароль, сохраненный в боте, не подходит для подключения к Jira.
+
+**Что делать:**
+1. Проверьте, не изменили ли вы пароль в Jira
+2. Обновите пароль в боте командой: `setup_jira <username> <новый_пароль>`
+
+После обновления пароля подключение будет автоматически разблокировано.
+
+Если проблема сохраняется, обратитесь к администратору."""
+            
+            mattermost_client.send_direct_message_by_email(user_email, message)
+            logger.info(f"Уведомление о блокировке отправлено пользователю {user_email}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления о блокировке пользователю {user_email}: {e}")
     
     def test_connection(self, user_email: str) -> Tuple[bool, str]:
         """Тестировать подключение к Jira для пользователя"""
