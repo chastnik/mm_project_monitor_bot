@@ -119,6 +119,32 @@ class DatabaseManager:
                     )
                 ''')
                 
+                # Таблица для хранения производственного календаря
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS production_calendar (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        year INTEGER NOT NULL,
+                        holiday_date DATE NOT NULL,
+                        is_holiday BOOLEAN DEFAULT 1,
+                        is_weekend BOOLEAN DEFAULT 0,
+                        description TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(year, holiday_date)
+                    )
+                ''')
+                
+                # Таблица для отслеживания загрузки календарей
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS calendar_metadata (
+                        year INTEGER PRIMARY KEY,
+                        is_loaded BOOLEAN DEFAULT 0,
+                        last_check_date DATE,
+                        last_update_date DATE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
                 # Индексы для оптимизации
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_email ON user_jira_settings(user_email)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_project_key ON project_subscriptions(project_key)')
@@ -126,6 +152,8 @@ class DatabaseManager:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_notification_date ON notification_history(notification_date)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_issue_project ON issue_cache(project_key)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_issue_assignee ON issue_cache(assignee_email)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_calendar_year ON production_calendar(year)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_calendar_date ON production_calendar(holiday_date)')
                 
                 conn.commit()
                 logger.info("База данных инициализирована успешно")
@@ -585,6 +613,101 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка получения истории проверок: {e}")
             return []
+    
+    def save_calendar_holidays(self, year: int, holidays: List[date], descriptions: Dict[date, str] = None) -> bool:
+        """Сохранить выходные и праздничные дни календаря на год"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Удаляем старые данные для этого года
+                cursor.execute('DELETE FROM production_calendar WHERE year = ?', (year,))
+                
+                # Сохраняем новые данные
+                for holiday_date in holidays:
+                    description = descriptions.get(holiday_date, '') if descriptions else ''
+                    # Определяем, является ли день выходным (суббота/воскресенье) или праздничным
+                    is_weekend = holiday_date.weekday() >= 5  # 5 = суббота, 6 = воскресенье
+                    is_holiday = not is_weekend  # Если не выходной, то праздничный
+                    
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO production_calendar 
+                        (year, holiday_date, is_holiday, is_weekend, description)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (year, holiday_date.isoformat(), is_holiday, is_weekend, description))
+                
+                # Обновляем метаданные
+                cursor.execute('''
+                    INSERT OR REPLACE INTO calendar_metadata 
+                    (year, is_loaded, last_update_date, updated_at)
+                    VALUES (?, 1, DATE('now'), CURRENT_TIMESTAMP)
+                ''', (year,))
+                
+                conn.commit()
+                logger.info(f"Сохранено {len(holidays)} выходных и праздничных дней для {year} года")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения календаря для {year} года: {e}")
+            return False
+    
+    def is_holiday(self, check_date: date) -> bool:
+        """Проверить, является ли день выходным или праздничным"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM production_calendar 
+                    WHERE holiday_date = ?
+                ''', (check_date.isoformat(),))
+                result = cursor.fetchone()
+                return result[0] > 0 if result else False
+        except Exception as e:
+            logger.error(f"Ошибка проверки выходного дня {check_date}: {e}")
+            return False
+    
+    def is_calendar_loaded(self, year: int) -> bool:
+        """Проверить, загружен ли календарь на год"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT is_loaded FROM calendar_metadata WHERE year = ?
+                ''', (year,))
+                result = cursor.fetchone()
+                return result[0] if result else False
+        except Exception as e:
+            logger.error(f"Ошибка проверки загрузки календаря для {year} года: {e}")
+            return False
+    
+    def update_calendar_check_date(self, year: int) -> bool:
+        """Обновить дату последней проверки календаря"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO calendar_metadata 
+                    (year, last_check_date, updated_at)
+                    VALUES (?, DATE('now'), CURRENT_TIMESTAMP)
+                ''', (year,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления даты проверки календаря для {year} года: {e}")
+            return False
+    
+    def get_calendar_check_date(self, year: int) -> Optional[str]:
+        """Получить дату последней проверки календаря"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT last_check_date FROM calendar_metadata WHERE year = ?
+                ''', (year,))
+                result = cursor.fetchone()
+                return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Ошибка получения даты проверки календаря для {year} года: {e}")
+            return None
 
 # Глобальный экземпляр менеджера БД
 db_manager = DatabaseManager()

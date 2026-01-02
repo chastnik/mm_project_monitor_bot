@@ -35,6 +35,8 @@ class Config:
     # Часовой пояс
     TIMEZONE = os.getenv('TIMEZONE', 'Europe/Moscow')
     
+    # API производственного календаря
+    CALENDAR_API_URL = os.getenv('CALENDAR_API_URL', 'https://calendar.kuzyak.in')
     
     # Логирование
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')

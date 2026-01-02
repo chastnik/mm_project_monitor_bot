@@ -2,12 +2,13 @@
 Модуль мониторинга проектов - проверка превышения трудозатрат и просроченных сроков
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Dict, Tuple, Optional
 from database import db_manager
 from mattermost_client import mattermost_client
 from user_jira_client import user_jira_client
 from config import config
+from calendar_client import calendar_client
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,17 @@ class ProjectMonitor:
         logger.info("Начинаем мониторинг всех активных проектов")
         
         try:
+            # Проверяем, не является ли сегодня выходным или праздничным днем
+            today = date.today()
+            if db_manager.is_holiday(today):
+                logger.info(f"Сегодня ({today}) выходной или праздничный день - мониторинг пропущен")
+                return
+            
+            # Дополнительная проверка через API (на случай, если календарь не загружен)
+            if not calendar_client.is_working_day(today):
+                logger.info(f"Сегодня ({today}) выходной или праздничный день (проверено через API) - мониторинг пропущен")
+                return
+            
             # Получаем все активные подписки
             subscriptions = db_manager.get_active_subscriptions()
             
@@ -282,9 +294,11 @@ class ProjectMonitor:
                 original_estimate, time_spent, False  # для личного сообщения
             )
             
-            # Проверяем день недели - не отправляем в каналы в субботу и воскресенье
-            current_weekday = datetime.now().weekday()  # 0=понедельник, 6=воскресенье
-            if current_weekday < 5:  # Понедельник-пятница (0-4)
+            # Проверяем, не является ли сегодня выходным или праздничным днем
+            today = date.today()
+            is_working_day = not db_manager.is_holiday(today) and calendar_client.is_working_day(today)
+            
+            if is_working_day:
                 # Отправляем уведомления в канал только в рабочие дни
                 mattermost_client.send_channel_message(channel_id, channel_message)
             
@@ -321,9 +335,11 @@ class ProjectMonitor:
                 issue.key, issue.fields.summary, assignee_name, due_date, False
             )
             
-            # Проверяем день недели - не отправляем в каналы в субботу и воскресенье
-            current_weekday = datetime.now().weekday()  # 0=понедельник, 6=воскресенье
-            if current_weekday < 5:  # Понедельник-пятница (0-4)
+            # Проверяем, не является ли сегодня выходным или праздничным днем
+            today = date.today()
+            is_working_day = not db_manager.is_holiday(today) and calendar_client.is_working_day(today)
+            
+            if is_working_day:
                 # Отправляем уведомления в канал только в рабочие дни
                 mattermost_client.send_channel_message(channel_id, channel_message)
             
