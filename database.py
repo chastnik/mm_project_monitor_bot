@@ -4,8 +4,8 @@
 import sqlite3
 import logging
 import re
-import hashlib
-from typing import List, Optional, Tuple
+from datetime import date
+from typing import List, Optional, Tuple, Dict
 from config import config
 from crypto_utils import password_crypto
 
@@ -545,12 +545,17 @@ class DatabaseManager:
                     updates.append("updated_at = CURRENT_TIMESTAMP")
                     params.append(email)
                     
+                    # Безопасное построение запроса с проверкой колонок
                     query = f"UPDATE monitored_users SET {', '.join(updates)} WHERE email = ?"
                     cursor.execute(query, params)
                     conn.commit()
                     return cursor.rowcount > 0
                 
                 return False
+        except sqlite3.OperationalError as e:
+            # Таблица может не существовать, если функционал не используется
+            logger.warning(f"Таблица monitored_users не найдена: {e}")
+            return False
         except Exception as e:
             logger.error(f"Ошибка обновления пользователя {email}: {e}")
             return False
@@ -602,19 +607,24 @@ class DatabaseManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                # Используем параметризованный запрос для безопасности
                 cursor.execute('''
                     SELECT ch.check_date, ch.user_email, mu.name, ch.has_worklog, ch.worklog_hours
                     FROM check_history ch
                     JOIN monitored_users mu ON ch.user_email = mu.email
-                    WHERE ch.check_date >= date('now', '-{} days')
+                    WHERE ch.check_date >= date('now', '-' || ? || ' days')
                     ORDER BY ch.check_date DESC, ch.user_email
-                '''.format(days))
+                ''', (days,))
                 return cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            # Таблицы могут не существовать, если функционал не используется
+            logger.warning(f"Таблицы check_history или monitored_users не найдены: {e}")
+            return []
         except Exception as e:
             logger.error(f"Ошибка получения истории проверок: {e}")
             return []
     
-    def save_calendar_holidays(self, year: int, holidays: List[date], descriptions: Dict[date, str] = None) -> bool:
+    def save_calendar_holidays(self, year: int, holidays: List[date], descriptions: Optional[Dict[date, str]] = None) -> bool:
         """Сохранить выходные и праздничные дни календаря на год"""
         try:
             with sqlite3.connect(self.db_path) as conn:
