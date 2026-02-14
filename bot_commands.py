@@ -28,6 +28,7 @@ class BotCommandHandler:
             'history': self.cmd_history,
             'status': self.cmd_status,
             'analytics': self.cmd_analytics,
+            'list_users': self.cmd_list_users,
         }
     
     def handle_message(self, message_text: str, user_email: str, channel_type: str = 'D', 
@@ -136,7 +137,22 @@ class BotCommandHandler:
             'analytics': 'analytics',
             'аналитика': 'analytics',
             'аналитика проекта': 'analytics',
-            'покажи аналитику': 'analytics'
+            'покажи аналитику': 'analytics',
+            'monitor_now': 'monitor_now',
+            'запусти мониторинг': 'monitor_now',
+            'мониторинг сейчас': 'monitor_now',
+            'проверь все': 'monitor_now',
+            'проверь всё': 'monitor_now',
+            'all_subscriptions': 'all_subscriptions',
+            'все подписки': 'all_subscriptions',
+            'все подписки системы': 'all_subscriptions',
+            'delete_subscription': 'delete_subscription',
+            'удали подписку': 'delete_subscription',
+            'удалить подписку': 'delete_subscription',
+            'list_users': 'list_users',
+            'пользователи': 'list_users',
+            'список пользователей': 'list_users',
+            'кто подключен': 'list_users',
         }
         
         # Преобразуем алиас в основную команду
@@ -156,7 +172,7 @@ class BotCommandHandler:
                 break
         
         # Проверяем права доступа для админских команд
-        admin_commands = ['monitor_now', 'all_subscriptions', 'delete_subscription']
+        admin_commands = ['monitor_now', 'all_subscriptions', 'delete_subscription', 'list_users']
         if command in admin_commands and not mattermost_client.is_user_admin(user_email):
             return "❌ У вас нет прав для выполнения этой команды"
         
@@ -264,6 +280,7 @@ class BotCommandHandler:
 • `monitor_now` - запустить мониторинг всех проектов сейчас
 • `all_subscriptions` - просмотреть все подписки в системе
 • `delete_subscription <PROJECT_KEY> <CHANNEL_ID>` - удалить подписку
+• `list_users` - список пользователей с настройками Jira
 
 """
         else:
@@ -552,6 +569,9 @@ class BotCommandHandler:
     
     def cmd_change_password(self, args: List[str], user_email: str, user_id: str = None) -> str:
         """Изменить пароль для Jira"""
+        if not user_id:
+            return "❌ Ошибка получения ID пользователя"
+        
         settings = db_manager.get_user_jira_settings(user_email)
         if not settings:
             return """❌ **Настройки Jira не найдены**
@@ -627,71 +647,6 @@ class BotCommandHandler:
             return f"✅ **Подписка удалена**\n\n📋 Проект: {project_key}\n📢 Канал: `{channel_id}`"
         else:
             return f"❌ Подписка не найдена: {project_key} в канале `{channel_id}`"
-    
-    def cmd_add_user(self, args: List[str], user_email: str) -> str:
-        """Добавить пользователя в мониторинг"""
-        if not args:
-            return "❌ Укажите email пользователя: `add_user user@company.com [Имя Фамилия]`"
-        
-        email = args[0].lower().strip()
-        name = ' '.join(args[1:]) if len(args) > 1 else None
-        
-        # Валидация email
-        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-            return "❌ Некорректный формат email адреса"
-        
-        # Проверяем существование пользователя в Mattermost
-        mm_user = mattermost_client.get_user_by_email(email)
-        mm_user_id = mm_user['id'] if mm_user else None
-        
-        # Проверяем существование пользователя в Jira
-        # Функция удалена - используются персональные настройки
-        jira_user = None  # Персональные настройки теперь
-        jira_account_id = None
-        
-        if not mm_user:
-            return f"⚠️ Пользователь {email} не найден в Mattermost"
-        
-        # Используем имя из систем если не указано
-        if not name:
-            if mm_user:
-                name = f"{mm_user.get('first_name', '')} {mm_user.get('last_name', '')}".strip()
-            elif jira_user:
-                name = jira_user['displayName']
-            
-            if not name:
-                name = email
-        
-        # Добавляем пользователя в БД
-        success = db_manager.add_user(email, name, mm_user_id, jira_account_id)
-        
-        if success:
-            warnings = []
-            if not mm_user:
-                warnings.append("не найден в Mattermost")
-            if not jira_user:
-                warnings.append("не найден в Jira")
-            
-            message = f"✅ Пользователь {name} ({email}) добавлен в мониторинг"
-            if warnings:
-                message += f"\n⚠️ Предупреждение: пользователь {', '.join(warnings)}"
-            
-            return message
-        else:
-            return f"❌ Пользователь {email} уже существует в базе данных"
-    
-    def cmd_remove_user(self, args: List[str], user_email: str) -> str:
-        """Удалить пользователя из мониторинга"""
-        if not args:
-            return "❌ Укажите email пользователя: `remove_user user@company.com`"
-        
-        email = args[0].lower().strip()
-        
-        success = db_manager.remove_user(email)
-        if success:
-            return f"✅ Пользователь {email} удален из мониторинга"
-        else:
-            return f"❌ Пользователь {email} не найден в базе данных"
     
     def cmd_list_users(self, args: List[str], user_email: str) -> str:
         """Показать список пользователей с настройками Jira"""

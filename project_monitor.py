@@ -21,15 +21,21 @@ class ProjectMonitor:
         logger.info("Начинаем мониторинг всех активных проектов")
         
         try:
-            # Проверяем, не является ли сегодня выходным или праздничным днем
             today = date.today()
+            
+            # Быстрая проверка: суббота (5) или воскресенье (6) — однозначно выходной
+            if today.weekday() >= 5:
+                logger.info(f"Сегодня ({today}, {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'][today.weekday()]}) выходной день (суббота/воскресенье) - мониторинг пропущен")
+                return
+            
+            # Проверяем, не является ли сегодня праздничным днем (по производственному календарю в БД)
             if db_manager.is_holiday(today):
-                logger.info(f"Сегодня ({today}) выходной или праздничный день - мониторинг пропущен")
+                logger.info(f"Сегодня ({today}) праздничный день - мониторинг пропущен")
                 return
             
             # Дополнительная проверка через API (на случай, если календарь не загружен)
             if not calendar_client.is_working_day(today):
-                logger.info(f"Сегодня ({today}) выходной или праздничный день (проверено через API) - мониторинг пропущен")
+                logger.info(f"Сегодня ({today}) нерабочий день (проверено через API) - мониторинг пропущен")
                 return
             
             # Получаем все активные подписки
@@ -294,15 +300,10 @@ class ProjectMonitor:
                 original_estimate, time_spent, False  # для личного сообщения
             )
             
-            # Проверяем, не является ли сегодня выходным или праздничным днем
-            today = date.today()
-            is_working_day = not db_manager.is_holiday(today) and calendar_client.is_working_day(today)
+            # Отправляем уведомления в канал
+            mattermost_client.send_channel_message(channel_id, channel_message)
             
-            if is_working_day:
-                # Отправляем уведомления в канал только в рабочие дни
-                mattermost_client.send_channel_message(channel_id, channel_message)
-            
-            # Личные сообщения отправляем всегда
+            # Личные сообщения ответственному
             if assignee_email:
                 mattermost_client.send_direct_message_by_email(assignee_email, personal_message)
             
@@ -335,15 +336,10 @@ class ProjectMonitor:
                 issue.key, issue.fields.summary, assignee_name, due_date, False
             )
             
-            # Проверяем, не является ли сегодня выходным или праздничным днем
-            today = date.today()
-            is_working_day = not db_manager.is_holiday(today) and calendar_client.is_working_day(today)
+            # Отправляем уведомления в канал
+            mattermost_client.send_channel_message(channel_id, channel_message)
             
-            if is_working_day:
-                # Отправляем уведомления в канал только в рабочие дни
-                mattermost_client.send_channel_message(channel_id, channel_message)
-            
-            # Личные сообщения отправляем всегда
+            # Личные сообщения ответственному
             if assignee_email:
                 mattermost_client.send_direct_message_by_email(assignee_email, personal_message)
             

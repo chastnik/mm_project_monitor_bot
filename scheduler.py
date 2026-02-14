@@ -62,15 +62,21 @@ class StandupScheduler:
         logger.info("Запуск ежедневного мониторинга проектов")
         
         try:
-            # Проверяем, не является ли сегодня выходным или праздничным днем
             today = date.today()
+            
+            # Быстрая проверка: суббота (5) или воскресенье (6) — однозначно выходной
+            if today.weekday() >= 5:
+                logger.info(f"Сегодня ({today}, {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'][today.weekday()]}) выходной день (суббота/воскресенье) - мониторинг пропущен")
+                return
+            
+            # Проверяем, не является ли сегодня праздничным днем (по производственному календарю в БД)
             if db_manager.is_holiday(today):
-                logger.info(f"Сегодня ({today}) выходной или праздничный день - мониторинг пропущен")
+                logger.info(f"Сегодня ({today}) праздничный день - мониторинг пропущен")
                 return
             
             # Дополнительная проверка через API (на случай, если календарь не загружен)
             if not calendar_client.is_working_day(today):
-                logger.info(f"Сегодня ({today}) выходной или праздничный день (проверено через API) - мониторинг пропущен")
+                logger.info(f"Сегодня ({today}) нерабочий день (проверено через API) - мониторинг пропущен")
                 return
             
             # Запускаем мониторинг всех активных проектов
@@ -136,28 +142,23 @@ class StandupScheduler:
             logger.error(f"Ошибка при загрузке календаря при старте: {e}")
     
     def _load_calendar_for_year(self, year: int) -> bool:
-        """Загрузить календарь на год из API"""
+        """Загрузить производственный календарь на год из API (поденные запросы)"""
         try:
-            calendar_data = calendar_client.get_year_calendar(year)
-            if not calendar_data:
-                logger.error(f"Не удалось получить календарь на {year} год")
-                return False
+            logger.info(f"Начинаем загрузку производственного календаря на {year} год...")
             
-            # Извлекаем выходные и праздничные дни
-            holidays = calendar_client.extract_holidays_from_calendar(calendar_data, year)
+            # Загружаем все нерабочие дни с описаниями через поденные запросы
+            holidays, descriptions = calendar_client.fetch_year_holidays(year)
             
             if not holidays:
-                logger.warning(f"Не найдено выходных дней в календаре на {year} год")
-                # Помечаем календарь как загруженный, даже если не нашли праздники
-                # (возможно, структура ответа другая)
+                logger.warning(f"Не найдено нерабочих дней в календаре на {year} год")
                 db_manager.update_calendar_check_date(year)
                 return False
             
-            # Сохраняем в БД
-            success = db_manager.save_calendar_holidays(year, list(holidays))
+            # Сохраняем в БД (с описаниями праздников)
+            success = db_manager.save_calendar_holidays(year, list(holidays), descriptions)
             
             if success:
-                logger.info(f"Календарь на {year} год успешно загружен ({len(holidays)} выходных дней)")
+                logger.info(f"Календарь на {year} год успешно загружен ({len(holidays)} нерабочих дней)")
             else:
                 logger.error(f"Ошибка сохранения календаря на {year} год")
             

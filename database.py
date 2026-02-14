@@ -330,7 +330,9 @@ class DatabaseManager:
                 
                 # Увеличиваем счетчик
                 new_attempts = current_attempts + 1
-                should_block = new_attempts >= 5
+                # Блокируем сразу при первой ошибке аутентификации,
+                # чтобы не делать лишних запросов к Jira с неправильным паролем
+                should_block = new_attempts >= 1
                 
                 if should_block:
                     # Блокируем пользователя
