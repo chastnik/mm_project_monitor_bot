@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: project-monitor-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_PATH=data/standup_bot.db
+      - LOG_FILE=data/standup_bot.log
+    volumes:
+      - ./data:/app/data
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
