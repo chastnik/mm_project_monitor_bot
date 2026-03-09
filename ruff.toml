@@ -1,0 +1,37 @@
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B905",   # zip() without strict=
+    "SIM108", # ternary operator (readability preference)
+    "RUF001", # ambiguous unicode (Cyrillic in strings is expected)
+    "RUF002", # ambiguous unicode in docstrings
+    "RUF003", # ambiguous unicode in comments
+]
+
+[lint.isort]
+known-first-party = [
+    "config",
+    "database",
+    "mattermost_client",
+    "jira_client",
+    "user_jira_client",
+    "project_monitor",
+    "project_analytics",
+    "scheduler",
+    "bot_commands",
+    "calendar_client",
+    "crypto_utils",
+]

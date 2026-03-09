@@ -1,45 +1,49 @@
 """
 Конфигурация для бота Mattermost
 """
+
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
 class Config:
     # Mattermost настройки
-    MATTERMOST_URL = os.getenv('MATTERMOST_URL', 'https://your-mattermost-server.com')
-    MATTERMOST_TOKEN = os.getenv('MATTERMOST_TOKEN')
-    MATTERMOST_USERNAME = os.getenv('MATTERMOST_USERNAME', 'standup-bot')
-    MATTERMOST_TEAM = os.getenv('MATTERMOST_TEAM')  # Команда в Mattermost
-    MATTERMOST_CHANNEL_ID = os.getenv('MATTERMOST_CHANNEL_ID')  # ID канала для отчетов
-    MATTERMOST_SSL_VERIFY = os.getenv('MATTERMOST_SSL_VERIFY', 'true').lower() == 'true'
-    
+    MATTERMOST_URL = os.getenv("MATTERMOST_URL", "https://your-mattermost-server.com")
+    MATTERMOST_TOKEN = os.getenv("MATTERMOST_TOKEN")
+    MATTERMOST_USERNAME = os.getenv("MATTERMOST_USERNAME", "standup-bot")
+    MATTERMOST_TEAM = os.getenv("MATTERMOST_TEAM")  # Команда в Mattermost
+    MATTERMOST_CHANNEL_ID = os.getenv("MATTERMOST_CHANNEL_ID")  # ID канала для отчетов
+    MATTERMOST_SSL_VERIFY = os.getenv("MATTERMOST_SSL_VERIFY", "true").lower() == "true"
+
     # Jira настройки (on-premise)
-    JIRA_URL = os.getenv('JIRA_URL', 'https://jira.your-company.com')
-    JIRA_VERIFY_SSL = os.getenv('JIRA_VERIFY_SSL', 'true').lower() == 'true'
-    
+    JIRA_URL = os.getenv("JIRA_URL", "https://jira.your-company.com")
+    JIRA_VERIFY_SSL = os.getenv("JIRA_VERIFY_SSL", "true").lower() == "true"
+
     # Tempo API настройки (опциональные)
-    TEMPO_API_URL = os.getenv('TEMPO_API_URL')
-    TEMPO_API_TOKEN = os.getenv('TEMPO_API_TOKEN')
-    
+    TEMPO_API_URL = os.getenv("TEMPO_API_URL")
+    TEMPO_API_TOKEN = os.getenv("TEMPO_API_TOKEN")
+
     # База данных
-    DATABASE_PATH = os.getenv('DATABASE_PATH', 'standup_bot.db')
-    
+    DATABASE_PATH = os.getenv("DATABASE_PATH", "standup_bot.db")
+
     # Администраторы (email адреса, разделенные запятыми)
-    ADMIN_EMAILS = os.getenv('ADMIN_EMAILS', '').split(',')
-    
+    ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
+
     # Расписание проверки (время в формате HH:MM)
-    CHECK_TIME = os.getenv('CHECK_TIME', '09:00')
-    
+    CHECK_TIME = os.getenv("CHECK_TIME", "09:00")
+
     # Часовой пояс
-    TIMEZONE = os.getenv('TIMEZONE', 'Europe/Moscow')
-    
+    TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
+
     # API производственного календаря
-    CALENDAR_API_URL = os.getenv('CALENDAR_API_URL', 'https://calendar.kuzyak.in')
-    
+    CALENDAR_API_URL = os.getenv("CALENDAR_API_URL", "https://calendar.kuzyak.in")
+
     # Логирование
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_FILE = os.getenv('LOG_FILE', 'standup_bot.log')
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FILE = os.getenv("LOG_FILE", "standup_bot.log")
+
 
 config = Config()

@@ -8,12 +8,12 @@ API: https://calendar.kuzyak.in
   GET /api/calendar/{year}/{MM}/{DD}
     → { year, month: { name, id (0-based) }, date, isWorkingDay: bool, isShortDay: bool, status, holiday?: str }
 """
+
 import logging
-import calendar as cal
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Set, Tuple
+from datetime import date, datetime, timedelta
+
+import requests
 
 from config import config
 
@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 class CalendarClient:
-    def __init__(self, api_url: str = None):
-        self.api_url = api_url or getattr(config, 'CALENDAR_API_URL', 'https://calendar.kuzyak.in')
+    def __init__(self, api_url: str | None = None):
+        self.api_url = api_url or getattr(config, "CALENDAR_API_URL", "https://calendar.kuzyak.in")
         self.session = requests.Session()
         self.session.timeout = 10
 
     # ── Базовые запросы к API ────────────────────────────────────────────
 
-    def get_year_calendar(self, year: int) -> Optional[Dict]:
+    def get_year_calendar(self, year: int) -> dict | None:
         """Получить агрегированную информацию по месяцам на год"""
         try:
             url = f"{self.api_url}/api/calendar/{year}"
@@ -39,7 +39,7 @@ class CalendarClient:
             logger.error(f"Ошибка получения календаря на {year} год: {e}")
             return None
 
-    def get_day_info(self, year: int, month: int, day: int) -> Optional[Dict]:
+    def get_day_info(self, year: int, month: int, day: int) -> dict | None:
         """
         Получить информацию о конкретном дне.
         month — 1-based (1=Январь, 12=Декабрь).
@@ -55,7 +55,7 @@ class CalendarClient:
 
     # ── Проверка рабочего дня (используется ежедневно) ───────────────────
 
-    def is_working_day(self, check_date: date = None) -> bool:
+    def is_working_day(self, check_date: date | None = None) -> bool:
         """
         Проверить, является ли день рабочим.
         1) weekday >= 5 → выходной (быстрая проверка без API)
@@ -76,10 +76,10 @@ class CalendarClient:
                 return True
 
             # API возвращает поле isWorkingDay (bool)
-            is_working = day_info.get('isWorkingDay', True)
+            is_working = day_info.get("isWorkingDay", True)
 
             if not is_working:
-                holiday_name = day_info.get('holiday', '')
+                holiday_name = day_info.get("holiday", "")
                 if holiday_name:
                     logger.info(f"{check_date} — нерабочий день: {holiday_name}")
                 else:
@@ -94,7 +94,7 @@ class CalendarClient:
 
     # ── Загрузка календаря на год (выходные + праздники) ─────────────────
 
-    def fetch_year_holidays(self, year: int) -> Tuple[Set[date], Dict[date, str]]:
+    def fetch_year_holidays(self, year: int) -> tuple[set[date], dict[date, str]]:
         """
         Загрузить все нерабочие дни года через поденные запросы к API.
         Возвращает (множество нерабочих дат, словарь {дата: описание}).
@@ -104,8 +104,8 @@ class CalendarClient:
         Исключение: в РФ бывают рабочие субботы (перенос), но в текущей версии
         мы их не учитываем — бот и так не работает в выходные (weekday >= 5).
         """
-        holidays: Set[date] = set()
-        descriptions: Dict[date, str] = {}
+        holidays: set[date] = set()
+        descriptions: dict[date, str] = {}
 
         # Определяем все дни года
         start = date(year, 1, 1)
@@ -114,7 +114,7 @@ class CalendarClient:
 
         # Сначала добавляем все субботы и воскресенья без запросов к API
         current = start
-        weekdays_to_check: List[date] = []
+        weekdays_to_check: list[date] = []
         for _ in range(total_days):
             if current.weekday() >= 5:
                 holidays.add(current)
@@ -122,21 +122,23 @@ class CalendarClient:
                 weekdays_to_check.append(current)
             current += timedelta(days=1)
 
-        logger.info(f"Календарь {year}: {len(holidays)} выходных (Сб/Вс), "
-                     f"проверяем {len(weekdays_to_check)} будних дней через API")
+        logger.info(
+            f"Календарь {year}: {len(holidays)} выходных (Сб/Вс), "
+            f"проверяем {len(weekdays_to_check)} будних дней через API"
+        )
 
         # Запрашиваем будние дни параллельно (до 10 потоков)
-        def _check_day(d: date) -> Tuple[date, bool, str]:
+        def _check_day(d: date) -> tuple[date, bool, str]:
             """Запросить один день. Возвращает (дата, is_working, описание)."""
             try:
                 info = self.get_day_info(d.year, d.month, d.day)
                 if info:
-                    is_working = info.get('isWorkingDay', True)
-                    holiday_name = info.get('holiday', '')
+                    is_working = info.get("isWorkingDay", True)
+                    holiday_name = info.get("holiday", "")
                     return d, is_working, holiday_name
-                return d, True, ''  # При ошибке считаем рабочим
+                return d, True, ""  # При ошибке считаем рабочим
             except Exception:
-                return d, True, ''
+                return d, True, ""
 
         non_working_weekdays = 0
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -152,19 +154,25 @@ class CalendarClient:
                 except Exception as e:
                     logger.error(f"Ошибка при проверке дня: {e}")
 
-        logger.info(f"Календарь {year}: найдено {non_working_weekdays} нерабочих будних дней (праздники/переносы), "
-                     f"всего нерабочих дней: {len(holidays)}")
+        logger.info(
+            f"Календарь {year}: найдено {non_working_weekdays} нерабочих будних дней (праздники/переносы), "
+            f"всего нерабочих дней: {len(holidays)}"
+        )
 
         return holidays, descriptions
 
-    def extract_holidays_from_calendar(self, calendar_data: Dict, year: int = None) -> Set[date]:
+    def extract_holidays_from_calendar(self, calendar_data: dict, year: int | None = None) -> set[date]:
         """
         Извлечь нерабочие дни из данных календаря.
         Так как API /api/calendar/{year} не содержит поденной информации,
         используем fetch_year_holidays() для загрузки через поденные запросы.
         """
         if year is None:
-            year = calendar_data.get('year', datetime.now().year) if isinstance(calendar_data, dict) else datetime.now().year
+            year = (
+                calendar_data.get("year", datetime.now().year)
+                if isinstance(calendar_data, dict)
+                else datetime.now().year
+            )
 
         holidays, _ = self.fetch_year_holidays(year)
         return holidays
