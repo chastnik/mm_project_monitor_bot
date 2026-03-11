@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      - TZ=${TIMEZONE:-Europe/Moscow}
       - DATABASE_PATH=data/standup_bot.db
       - LOG_FILE=data/standup_bot.log
       - CRYPTO_SALT_FILE=data/.crypto_salt
