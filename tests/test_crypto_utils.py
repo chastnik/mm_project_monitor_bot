@@ -1,4 +1,5 @@
 import os
+import base64
 import tempfile
 import unittest
 import importlib
@@ -40,6 +41,33 @@ class TestPasswordCryptoSaltPath(unittest.TestCase):
                 else:
                     os.environ["CRYPTO_SALT_FILE"] = original_salt_path
                 os.chdir(original_cwd)
+
+    def test_falls_back_to_hashlib_when_sha256_is_unsupported_in_cryptography(self):
+        import crypto_utils
+
+        crypto_utils = importlib.reload(crypto_utils)
+        fixed_salt = b"\x01" * 16
+        fallback_key = b"\x02" * 32
+
+        with (
+            patch.object(crypto_utils.PasswordCrypto, "_get_or_create_salt", return_value=fixed_salt),
+            patch.object(
+                crypto_utils,
+                "PBKDF2HMAC",
+                side_effect=crypto_utils.UnsupportedAlgorithm("sha256 is not supported for PBKDF2."),
+            ),
+            patch.object(crypto_utils.hashlib, "pbkdf2_hmac", return_value=fallback_key) as mock_pbkdf2,
+        ):
+            crypto = crypto_utils.PasswordCrypto()
+
+        self.assertEqual(crypto.key, base64.urlsafe_b64encode(fallback_key))
+        mock_pbkdf2.assert_called_once_with(
+            "sha256",
+            b"MM_STANDUP_BOT_ENCRYPTION_KEY_2024",
+            fixed_salt,
+            100000,
+            dklen=32,
+        )
 
     def test_falls_back_to_tmp_when_all_project_paths_are_not_writable(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -3,11 +3,13 @@
 """
 
 import base64
+import hashlib
 import logging
 import os
 import tempfile
 from pathlib import Path
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -86,15 +88,40 @@ class PasswordCrypto:
         # Используем фиксированный пароль + соль для создания ключа
         # В продакшене лучше использовать переменную окружения
         base_password = "MM_STANDUP_BOT_ENCRYPTION_KEY_2024"
+        base_password_bytes = base_password.encode()
+        iterations = 100000
 
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=self.salt,
-            iterations=100000,  # Много итераций для безопасности
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(base_password.encode()))
-        return key
+        try:
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=self.salt,
+                iterations=iterations,  # Много итераций для безопасности
+            )
+            return base64.urlsafe_b64encode(kdf.derive(base_password_bytes))
+        except UnsupportedAlgorithm as exc:
+            logger.warning(
+                "PBKDF2HMAC с SHA256 недоступен в backend cryptography, используем hashlib fallback: %s",
+                exc,
+            )
+            try:
+                derived_key = hashlib.pbkdf2_hmac(
+                    "sha256",
+                    base_password_bytes,
+                    self.salt,
+                    iterations,
+                    dklen=32,
+                )
+            except ValueError:
+                # В крайне ограниченных окружениях sha256 может быть недоступен и в hashlib.
+                derived_key = hashlib.pbkdf2_hmac(
+                    "sha512",
+                    base_password_bytes,
+                    self.salt,
+                    iterations,
+                    dklen=32,
+                )
+            return base64.urlsafe_b64encode(derived_key)
 
     def encrypt_password(self, password: str) -> str:
         """Зашифровать пароль"""

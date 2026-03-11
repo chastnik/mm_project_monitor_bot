@@ -440,8 +440,8 @@ class BotCommandHandler:
 
 Сначала настройте подключение командой: `setup_jira username password`"""
 
-            # Получаем все проекты без ограничений через прямой вызов API
-            # Jira API возвращает максимум 50 проектов за раз по умолчанию, поэтому используем пагинацию
+            # Получаем все проекты через paginated endpoint
+            # Jira API отдает проекты страницами, поэтому идем по всем страницам
             all_projects = []
             start_at = 0
             max_results = 50
@@ -455,8 +455,8 @@ class BotCommandHandler:
 
             try:
                 while True:
-                    # Используем прямой вызов к REST API для получения всех проектов
-                    url = jira_client._options["server"] + "/rest/api/2/project"
+                    # Используем endpoint с поддержкой пагинации
+                    url = jira_client._options["server"] + "/rest/api/2/project/search"
                     params = {
                         "startAt": start_at,
                         "maxResults": max_results,
@@ -465,7 +465,16 @@ class BotCommandHandler:
 
                     response = jira_client._session.get(url, params=params)
                     response.raise_for_status()
-                    projects_data = response.json()
+                    payload = response.json()
+
+                    # /project/search возвращает {"values": [...], ...}, но для совместимости
+                    # поддерживаем и старый формат списка.
+                    if isinstance(payload, dict):
+                        projects_data = payload.get("values", [])
+                        is_last = payload.get("isLast")
+                    else:
+                        projects_data = payload
+                        is_last = None
 
                     if not projects_data:
                         break
@@ -474,8 +483,8 @@ class BotCommandHandler:
                     for project_data in projects_data:
                         all_projects.append(Project(project_data))
 
-                    # Если получили меньше max_results, значит это последняя страница
-                    if len(projects_data) < max_results:
+                    # Если Jira явно сообщает конец или данных меньше страницы — выходим
+                    if is_last is True or len(projects_data) < max_results:
                         break
 
                     start_at += max_results
