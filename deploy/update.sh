@@ -56,6 +56,17 @@ if [ ! -f docker-compose.yml ]; then
     fail "docker-compose.yml не найден в $PROJECT_DIR"
 fi
 
+# ─── UID/GID для контейнера и права data ────────────────────────────────────
+
+APP_UID="${SUDO_UID:-$(id -u)}"
+APP_GID="${SUDO_GID:-$(id -g)}"
+export APP_UID APP_GID
+info "UID/GID для контейнера: ${APP_UID}:${APP_GID}"
+
+mkdir -p data
+chown -R "$APP_UID:$APP_GID" data || fail "Не удалось назначить владельца для data"
+chmod 775 data || fail "Не удалось выставить права на data"
+
 # ─── Бэкап данных перед обновлением ─────────────────────────────────────────
 
 if [ -d data ] && [ "$(ls -A data 2>/dev/null)" ]; then

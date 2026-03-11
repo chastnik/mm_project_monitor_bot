@@ -5,6 +5,7 @@
 import base64
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -66,6 +67,7 @@ class PasswordCrypto:
                 db_dir / ".crypto_salt",
                 Path("data/.crypto_salt"),
                 Path(".crypto_salt"),
+                Path(tempfile.gettempdir()) / "project_monitor_bot" / ".crypto_salt",
             ]
         )
 
