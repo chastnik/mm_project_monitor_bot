@@ -69,4 +69,3 @@ class TestConfigWritablePaths(unittest.TestCase):
                     os.environ.pop("LOG_FILE", None)
                 else:
                     os.environ["LOG_FILE"] = old_log
-

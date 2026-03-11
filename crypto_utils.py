@@ -50,8 +50,7 @@ class PasswordCrypto:
                 logger.warning("Не удалось использовать salt файл %s: %s", salt_file, exc)
 
         raise RuntimeError(
-            "Не удалось получить или создать salt файл ни в одном пути: "
-            f"{', '.join(str(path) for path in salt_paths)}"
+            f"Не удалось получить или создать salt файл ни в одном пути: {', '.join(str(path) for path in salt_paths)}"
         ) from last_error
 
     def _get_salt_paths(self) -> list[Path]:
