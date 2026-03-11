@@ -76,13 +76,14 @@ ok "Репозиторий склонирован"
 # ─── Создание директории данных ──────────────────────────────────────────────
 
 mkdir -p "$INSTALL_DIR/data"
+chmod -R u+rwX,g+rwX "$INSTALL_DIR/data"
 ok "Директория данных: $INSTALL_DIR/data"
 
 # ─── Создание .env ───────────────────────────────────────────────────────────
 
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     cp "$INSTALL_DIR/env.example" "$INSTALL_DIR/.env"
-    chmod 600 "$INSTALL_DIR/.env"
+    chmod 640 "$INSTALL_DIR/.env"
     warn "Создан файл .env из шаблона — ОБЯЗАТЕЛЬНО отредактируйте его!"
 else
     info "Файл .env уже существует, пропускаем"
@@ -108,9 +109,9 @@ echo "  1. Отредактируйте конфигурацию:"
 echo "     nano $INSTALL_DIR/.env"
 echo ""
 echo "  2. Запустите бота:"
-echo "     cd $INSTALL_DIR && $COMPOSE_CMD up -d"
+echo "     cd $INSTALL_DIR && sudo $COMPOSE_CMD up -d"
 echo ""
 echo "  3. Проверьте статус:"
-echo "     $COMPOSE_CMD ps"
-echo "     $COMPOSE_CMD logs -f"
+echo "     sudo $COMPOSE_CMD ps"
+echo "     sudo $COMPOSE_CMD logs -f"
 echo ""

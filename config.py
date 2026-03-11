@@ -3,10 +3,28 @@
 """
 
 import os
+import tempfile
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _resolve_writable_file_path(raw_path: str, fallback_filename: str) -> str:
+    """Вернуть writable путь; при проблемах перейти в /tmp."""
+    path = Path(raw_path)
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8"):
+            pass
+        return str(path)
+    except OSError:
+        fallback_dir = Path(tempfile.gettempdir()) / "project_monitor_bot"
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        fallback_path = fallback_dir / fallback_filename
+        return str(fallback_path)
 
 
 class Config:
@@ -27,7 +45,7 @@ class Config:
     TEMPO_API_TOKEN = os.getenv("TEMPO_API_TOKEN")
 
     # База данных
-    DATABASE_PATH = os.getenv("DATABASE_PATH", "standup_bot.db")
+    DATABASE_PATH = _resolve_writable_file_path(os.getenv("DATABASE_PATH", "standup_bot.db"), "standup_bot.db")
 
     # Администраторы (email адреса, разделенные запятыми)
     ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
@@ -43,7 +61,7 @@ class Config:
 
     # Логирование
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FILE = os.getenv("LOG_FILE", "standup_bot.log")
+    LOG_FILE = _resolve_writable_file_path(os.getenv("LOG_FILE", "standup_bot.log"), "standup_bot.log")
 
 
 config = Config()

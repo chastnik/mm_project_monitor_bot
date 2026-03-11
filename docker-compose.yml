@@ -2,7 +2,7 @@ services:
   bot:
     build: .
     container_name: project-monitor-bot
-    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    user: "${APP_UID:-0}:${APP_GID:-0}"
     restart: unless-stopped
     env_file: .env
     environment:

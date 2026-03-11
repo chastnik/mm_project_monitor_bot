@@ -60,12 +60,25 @@ fi
 
 APP_UID="${SUDO_UID:-$(id -u)}"
 APP_GID="${SUDO_GID:-$(id -g)}"
+if [ "$(id -u)" -eq 0 ]; then
+    # Для типового деплоя через sudo в /opt запускаем контейнер под root,
+    # чтобы исключить ошибки записи в bind-mount директории.
+    APP_UID=0
+    APP_GID=0
+fi
 export APP_UID APP_GID
 info "UID/GID для контейнера: ${APP_UID}:${APP_GID}"
 
 mkdir -p data
 chown -R "$APP_UID:$APP_GID" data || fail "Не удалось назначить владельца для data"
-chmod 775 data || fail "Не удалось выставить права на data"
+chmod -R u+rwX,g+rwX data || fail "Не удалось выставить права на data"
+
+if [ -f .env ]; then
+    if [ "${SUDO_UID:-}" ] && [ "${SUDO_GID:-}" ]; then
+        chown "${SUDO_UID}:${SUDO_GID}" .env || warn "Не удалось сменить владельца .env"
+    fi
+    chmod 640 .env || warn "Не удалось выставить права на .env"
+fi
 
 # ─── Бэкап данных перед обновлением ─────────────────────────────────────────
 
