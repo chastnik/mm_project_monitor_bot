@@ -5,6 +5,7 @@
 import base64
 import logging
 import os
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -21,21 +22,62 @@ class PasswordCrypto:
 
     def _get_or_create_salt(self) -> bytes:
         """Получить или создать соль для шифрования"""
-        salt_file = ".crypto_salt"
+        salt_paths = self._get_salt_paths()
+        last_error = None
 
-        if os.path.exists(salt_file):
-            with open(salt_file, "rb") as f:
-                salt = f.read()
-            logger.debug("Соль загружена из файла")
-        else:
-            salt = os.urandom(16)  # 16 байт случайной соли
-            with open(salt_file, "wb") as f:
-                f.write(salt)
-            # Устанавливаем безопасные права доступа только для владельца
-            os.chmod(salt_file, 0o600)
-            logger.info("Создана новая соль для шифрования")
+        for salt_file in salt_paths:
+            try:
+                salt_file.parent.mkdir(parents=True, exist_ok=True)
 
-        return salt
+                if salt_file.exists():
+                    with salt_file.open("rb") as f:
+                        salt = f.read()
+                    logger.debug("Соль загружена из файла: %s", salt_file)
+                    return salt
+
+                salt = os.urandom(16)  # 16 байт случайной соли
+                with salt_file.open("wb") as f:
+                    f.write(salt)
+                # Устанавливаем безопасные права доступа только для владельца
+                os.chmod(salt_file, 0o600)
+                logger.info("Создана новая соль для шифрования: %s", salt_file)
+                return salt
+            except OSError as exc:
+                last_error = exc
+                logger.warning("Не удалось использовать salt файл %s: %s", salt_file, exc)
+
+        raise RuntimeError(
+            "Не удалось получить или создать salt файл ни в одном пути: "
+            f"{', '.join(str(path) for path in salt_paths)}"
+        ) from last_error
+
+    def _get_salt_paths(self) -> list[Path]:
+        """Список путей для salt в порядке приоритета."""
+        candidates: list[Path] = []
+
+        env_path = os.getenv("CRYPTO_SALT_FILE")
+        if env_path:
+            candidates.append(Path(env_path))
+
+        database_path = os.getenv("DATABASE_PATH", "data/standup_bot.db")
+        db_dir = Path(database_path).parent
+        candidates.extend(
+            [
+                db_dir / ".crypto_salt",
+                Path("data/.crypto_salt"),
+                Path(".crypto_salt"),
+            ]
+        )
+
+        # Удаляем дубликаты путей, сохраняя порядок приоритета.
+        unique_candidates: list[Path] = []
+        seen: set[Path] = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            unique_candidates.append(path)
+            seen.add(path)
+        return unique_candidates
 
     def _derive_key(self) -> bytes:
         """Создать ключ шифрования из соли"""

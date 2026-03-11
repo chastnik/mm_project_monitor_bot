@@ -7,6 +7,7 @@ services:
     environment:
       - DATABASE_PATH=data/standup_bot.db
       - LOG_FILE=data/standup_bot.log
+      - CRYPTO_SALT_FILE=data/.crypto_salt
     volumes:
       - ./data:/app/data
     stop_grace_period: 15s
