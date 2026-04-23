@@ -3,7 +3,7 @@ requests>=2.31.0
 schedule>=1.2.0
 python-dotenv>=1.0.0
 cryptography>=45.0.0
-jira>=3.5.0
+jira>=3.10.5
 aiohttp>=3.8.0
 websockets>=11.0.0
 
