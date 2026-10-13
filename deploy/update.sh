@@ -121,6 +121,12 @@ else
     ok "Код обновлён до $(echo "$AFTER" | cut -c1-8)"
 fi
 
+# ─── Секрет для шифрования токенов ──────────────────────────────────────────
+
+if [ -f .env ] && [ -x deploy/ensure_encryption_key.sh ]; then
+    ./deploy/ensure_encryption_key.sh .env || fail "Не удалось добавить ENCRYPTION_KEY в .env"
+fi
+
 # ─── Пересборка образа ──────────────────────────────────────────────────────
 
 info "Пересборка Docker-образа..."

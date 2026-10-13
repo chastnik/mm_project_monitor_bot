@@ -2,7 +2,9 @@
 Обработчик команд бота
 """
 
+import contextlib
 import logging
+import os
 import re
 
 from auth_messages import mask_secrets, pat_instructions, setup_required_message
@@ -213,6 +215,8 @@ class BotCommandHandler:
                     return self.commands[command](args, user_email, user_id)
                 elif command == "analytics":
                     return self.commands[command](args, user_email, channel_id, user_id)
+                elif command == "history":
+                    return self.commands[command](args, user_email, channel_id, channel_type)
                 else:
                     return self.commands[command](args, user_email)
             except Exception as e:
@@ -262,11 +266,15 @@ class BotCommandHandler:
                 # Отправляем текстовый отчет
                 mattermost_client.send_channel_message(channel_id, report_text)
 
-                # Отправляем изображение, если оно было создано
+                # Отправляем изображение, если оно было создано, и удаляем временный файл
                 if image_path:
-                    mattermost_client.upload_image(
-                        channel_id, image_path, f"📊 Аналитика проекта {project_key}", root_id=None
-                    )
+                    try:
+                        mattermost_client.upload_image(
+                            channel_id, image_path, f"📊 Аналитика проекта {project_key}", root_id=None
+                        )
+                    finally:
+                        with contextlib.suppress(OSError):
+                            os.remove(image_path)
                 return None  # Сообщение уже отправлено через send_channel_message и upload_image
             else:
                 return f"❌ Не удалось получить аналитику для проекта {project_key}. Проверьте ключ проекта и подключение к Jira (`test_jira`)."
@@ -300,7 +308,7 @@ class BotCommandHandler:
 
 **Управление мониторингом:**
 • `run_subscriptions` - запустить проверку подписок текущего канала
-• `history` - история уведомлений за последние дни
+• `history [дни]` - история уведомлений канала за последние дни (по умолчанию 7)
 • `status` - статус бота и вашего подключения к Jira
 
 **Информационные команды:**
@@ -790,8 +798,10 @@ class BotCommandHandler:
             logger.error(f"Ошибка ручного мониторинга: {e}")
             return f"❌ Ошибка запуска мониторинга: {e!s}"
 
-    def cmd_history(self, args: list[str], user_email: str) -> str:
-        """Показать историю проверок"""
+    def cmd_history(
+        self, args: list[str], user_email: str, channel_id: str | None = None, channel_type: str = "D"
+    ) -> str:
+        """Показать историю уведомлений: в канале - по этому каналу, в ЛС администратору - по всем каналам"""
         days = 7  # По умолчанию за неделю
 
         if args:
@@ -802,36 +812,35 @@ class BotCommandHandler:
             except ValueError:
                 return "❌ Некорректное количество дней"
 
-        history = db_manager.get_check_history(days)
+        if channel_type == "D":
+            if not mattermost_client.is_user_admin(user_email):
+                return "ℹ️ Выполните `history` в канале с подписками, чтобы увидеть уведомления этого канала"
+            history = db_manager.get_notification_history(days)
+            scope = "во всех каналах"
+        else:
+            history = db_manager.get_notification_history(days, channel_id)
+            scope = "в этом канале"
 
         if not history:
-            return f"📊 Нет данных за последние {days} дней"
+            return f"📊 Уведомлений {scope} за последние {days} дн. не было"
 
-        # Группируем по датам
-        by_date = {}
-        for check_date, email, name, has_worklog, hours in history:
-            if check_date not in by_date:
-                by_date[check_date] = {"with": [], "without": []}
+        type_labels = {"time_exceeded": "⏱️ превышение трудозатрат", "deadline_overdue": "📅 просрочен срок"}
+        max_lines_per_day = 20
 
-            user_info = f"{name or email}"
-            if has_worklog:
-                user_info += f" ({hours:.1f}ч)"
-                by_date[check_date]["with"].append(user_info)
-            else:
-                by_date[check_date]["without"].append(user_info)
+        by_date: dict[str, list[str]] = {}
+        for notification_date, project_key, issue_key, notification_type, assignee_name in history:
+            label = type_labels.get(notification_type, notification_type)
+            by_date.setdefault(notification_date, []).append(
+                f"  • [{project_key}] {issue_key} — {label} ({assignee_name or 'Не назначен'})"
+            )
 
-        message_parts = [f"📊 **История проверок за {days} дней:**\n"]
-
-        for date in sorted(by_date.keys(), reverse=True):
-            data = by_date[date]
-            message_parts.append(f"**{date}:**")
-
-            if data["with"]:
-                message_parts.append(f"  ✅ Заполнили ({len(data['with'])}): {', '.join(data['with'])}")
-
-            if data["without"]:
-                message_parts.append(f"  ❌ Не заполнили ({len(data['without'])}): {', '.join(data['without'])}")
-
+        message_parts = [f"📊 **История уведомлений {scope} за {days} дн. (всего: {len(history)}):**\n"]
+        for notification_date in sorted(by_date, reverse=True):
+            lines = by_date[notification_date]
+            message_parts.append(f"**{notification_date}** ({len(lines)}):")
+            message_parts.extend(lines[:max_lines_per_day])
+            if len(lines) > max_lines_per_day:
+                message_parts.append(f"  _…и еще {len(lines) - max_lines_per_day}_")
             message_parts.append("")
 
         return "\n".join(message_parts)
@@ -872,13 +881,9 @@ class BotCommandHandler:
         active_subscriptions = [s for s in subscriptions if s[5]]  # активные подписки
         message_parts.append(f"**Активные подписки:** {len(active_subscriptions)}")
 
-        # Последняя проверка
-        history = db_manager.get_check_history(1)
-        if history:
-            last_check = history[0][0]  # Дата последней проверки
-            message_parts.append(f"**Последняя проверка:** {last_check}")
-        else:
-            message_parts.append("**Последняя проверка:** не выполнялась")
+        # Последнее уведомление
+        last_notification = db_manager.get_last_notification_date()
+        message_parts.append(f"**Последнее уведомление:** {last_notification or 'не отправлялось'}")
 
         return "\n".join(message_parts)
 

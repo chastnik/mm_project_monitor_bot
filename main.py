@@ -11,9 +11,9 @@ import sys
 import time
 from datetime import datetime
 
-from auth_messages import legacy_user_disabled_message, mask_secrets
-from bot_commands import command_handler
+from auth_messages import legacy_user_disabled_message, token_reset_message
 from config import config
+from crypto_utils import MIN_ENCRYPTION_KEY_LENGTH, get_encryption_secret, password_crypto
 from database import db_manager
 from mattermost_client import mattermost_client
 from scheduler import scheduler
@@ -54,6 +54,11 @@ class StandupBot:
             # Инициализируем базу данных
             db_manager.init_database()
             self.logger.info("✅ База данных инициализирована")
+
+            # Если ключ шифрования изменился, сохраненные токены расшифровать нельзя - сбрасываем их
+            reset_count = db_manager.reset_tokens_if_key_changed(password_crypto.key_fingerprint())
+            if reset_count:
+                self.logger.warning(f"🔑 Ключ шифрования изменился, пользователям нужно войти заново: {reset_count}")
 
             # Проверяем подключения
             self._test_connections()
@@ -126,6 +131,15 @@ class StandupBot:
         if not config.ADMIN_EMAILS or not any(email.strip() for email in config.ADMIN_EMAILS):
             raise ValueError("Не задан список администраторов (ADMIN_EMAILS)")
 
+        encryption_secret = get_encryption_secret()
+        if not encryption_secret:
+            raise ValueError(
+                "Не задан ENCRYPTION_KEY - секрет для шифрования токенов Jira. "
+                "Сгенерируйте его командой `openssl rand -base64 32` и добавьте в .env"
+            )
+        if len(encryption_secret) < MIN_ENCRYPTION_KEY_LENGTH:
+            raise ValueError(f"ENCRYPTION_KEY слишком короткий: нужно не меньше {MIN_ENCRYPTION_KEY_LENGTH} символов")
+
         self.logger.info("✅ Конфигурация проверена")
 
     def _test_connections(self):
@@ -159,107 +173,18 @@ class StandupBot:
             self.logger.error(f"❌ Ошибка настройки WebSocket: {e}")
             self.websocket = False
 
-    def _websocket_handler(self, message):
-        """Обработчик WebSocket сообщений"""
-        try:
-            event = message.get("event")
-
-            # Обработка новых сообщений
-            if event == "posted":
-                self._handle_posted_message(message)
-
-            # Обработка создания новых каналов (включая DM) - упрощено
-            elif event == "channel_created":
-                pass  # Упрощенная версия не требует предварительной инициализации DM каналов
-
-            # Обработка добавления пользователей в каналы
-            elif event == "user_added":
-                self._handle_user_added(message.get("data", {}))
-
-        except Exception as e:
-            self.logger.error(f"Ошибка обработки WebSocket сообщения: {e}")
-
-    def _handle_posted_message(self, message):
-        """Обработка новых сообщений"""
-        try:
-            post_data = message.get("data", {}).get("post")
-            if not post_data:
-                return
-
-            # Безопасный парсинг JSON
-            import json
-
-            try:
-                post = json.loads(post_data)
-            except (json.JSONDecodeError, TypeError):
-                # Fallback на eval для совместимости
-                post = eval(post_data)
-
-            # Игнорируем сообщения от бота
-            if post.get("user_id") == mattermost_client.bot_user_id:
-                return
-
-            # Получаем информацию о пользователе
-            user_id = post.get("user_id")
-            user = mattermost_client.driver.users.get_user(user_id)
-            user_email = user.get("email", "")
-
-            # Получаем информацию о канале
-            channel_id = post.get("channel_id")
-            channel = mattermost_client.driver.channels.get_channel(channel_id)
-            channel_type = channel.get("type", "O")
-            team_id = message.get("data", {}).get("team_id", "")
-
-            message_text = post.get("message", "").strip()
-
-            # Логируем получение сообщения для отладки
-            self.logger.debug(
-                f"Получено сообщение от {user_email} в канале {channel_type}: {mask_secrets(message_text)[:50]}..."
-            )
-
-            # Обрабатываем только личные сообщения или упоминания бота в каналах
-            should_process = False
-
-            if channel_type == "D" or f"@{mattermost_client.bot_username}" in message_text:  # Личные сообщения
-                should_process = True
-
-            if should_process and message_text:
-                # Автоматически инициализируем DM канал если это первое сообщение
-                # Личные сообщения обрабатываются автоматически в упрощенной версии
-
-                # Обрабатываем команду
-                response = command_handler.handle_message(
-                    message_text, user_email, channel_type, channel_id, team_id, user_id
-                )
-
-                if response:
-                    if channel_type == "D":
-                        # Отправляем ответ в личные сообщения
-                        mattermost_client.send_direct_message(user_id, response)
-                    else:
-                        # Отправляем ответ в канал (с упоминанием пользователя)
-                        response_with_mention = f"@{user.get('username', user_email)} {response}"
-                        mattermost_client.send_channel_message(channel_id, response_with_mention)
-
-        except Exception as e:
-            self.logger.error(f"Ошибка обработки сообщения: {e}")
-
-    def _handle_user_added(self, event_data):
-        """Обработка добавления пользователей в каналы - упрощенная версия"""
-        # В упрощенной версии не требуется предварительное кеширование DM каналов
-        pass
-
     def _notify_legacy_users(self):
-        """Отключить пользователей со старой авторизацией (логин/пароль) и отправить им инструкцию по входу через PAT"""
+        """Отключить пользователей без действующего PAT (старый вход по паролю или сброшенный токен)
+        и отправить им инструкцию по входу через PAT"""
         legacy_users = db_manager.get_legacy_users_to_notify()
         if not legacy_users:
             return
 
-        self.logger.info(f"🔑 Пользователей со старой авторизацией для уведомления: {len(legacy_users)}")
-        message = legacy_user_disabled_message()
+        self.logger.info(f"🔑 Пользователей без действующего токена для уведомления: {len(legacy_users)}")
         notified_count = 0
 
-        for user_email, user_id in legacy_users:
+        for user_email, user_id, auth_type in legacy_users:
+            message = token_reset_message() if auth_type == "pat_reset" else legacy_user_disabled_message()
             sent = False
             try:
                 if user_id:
@@ -267,18 +192,16 @@ class StandupBot:
                 if not sent and not user_email.startswith("user_"):
                     sent = mattermost_client.send_direct_message_by_email(user_email, message)
             except Exception as e:
-                self.logger.warning(
-                    f"Не удалось отправить уведомление о переходе на PAT пользователю {user_email}: {e}"
-                )
+                self.logger.warning(f"Не удалось отправить уведомление о входе по PAT пользователю {user_email}: {e}")
 
             # Пароль удаляем в любом случае; недоставленное уведомление повторим при следующем запуске
             db_manager.disable_legacy_user(user_email, notified=bool(sent))
             if sent:
                 notified_count += 1
             else:
-                self.logger.warning(f"Уведомление о переходе на PAT не доставлено пользователю {user_email}")
+                self.logger.warning(f"Уведомление о входе по PAT не доставлено пользователю {user_email}")
 
-        self.logger.info(f"✅ Уведомления о переходе на PAT отправлены: {notified_count} из {len(legacy_users)}")
+        self.logger.info(f"✅ Уведомления о входе по PAT отправлены: {notified_count} из {len(legacy_users)}")
 
     def _send_startup_message(self):
         """Отправить сообщение о запуске бота"""

@@ -37,9 +37,9 @@ class TestConfigWritablePaths(unittest.TestCase):
 
     def test_falls_back_to_tmp_when_paths_not_writable(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
+            # Обычный файл вместо каталога: запись "внутрь" него невозможна даже под root
             readonly_dir = Path(tmp_dir) / "readonly"
-            readonly_dir.mkdir()
-            readonly_dir.chmod(0o500)
+            readonly_dir.touch()
 
             old_db = os.environ.get("DATABASE_PATH")
             old_log = os.environ.get("LOG_FILE")

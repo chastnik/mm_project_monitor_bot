@@ -16,6 +16,9 @@ from user_jira_client import user_jira_client
 
 logger = logging.getLogger(__name__)
 
+# Сколько последних обновленных задач проекта учитывается в аналитике
+MAX_ANALYTICS_ISSUES = 5000
+
 
 class ProjectAnalytics:
     def __init__(self):
@@ -23,9 +26,10 @@ class ProjectAnalytics:
 
     def build_project_analytics(self, user_email: str, project_key: str) -> tuple[str, str | None]:
         """Собрать текстовый отчет и сгенерировать .jpg с графиками"""
-        issues = user_jira_client.get_project_issues(user_email, project_key, max_results=1000)
-        if not issues:
+        result = user_jira_client.get_project_issues(user_email, project_key, max_results=MAX_ANALYTICS_ISSUES)
+        if not result or not result[0]:
             return f"ℹ️ Нет данных по проекту {project_key} или нет доступа", None
+        issues, total_in_project = result
 
         # Метрики
         total = len(issues)
@@ -59,7 +63,9 @@ class ProjectAnalytics:
 
         created_per_month: dict[str, int] = {}
         closed_per_month: dict[str, int] = {}
-        six_months_ago = (today.replace(day=1) - timedelta(days=180)).replace(day=1)
+        # Первое число месяца, отстоящего на 5 месяцев назад: в графике 6 месяцев, включая текущий
+        start_month_index = today.year * 12 + today.month - 1 - 5
+        six_months_ago = today.replace(year=start_month_index // 12, month=start_month_index % 12 + 1, day=1)
 
         assignee_total: dict[str, int] = {}
         assignee_open: dict[str, int] = {}
@@ -176,6 +182,12 @@ class ProjectAnalytics:
             f"• С превышением трудозатрат: {over_estimate_count}",
             f"• Просроченных: {overdue_count}",
         ]
+        if total_in_project > total:
+            lines.insert(
+                1,
+                f"⚠️ Учтены {total} последних обновленных задач из {total_in_project} "
+                f"(ограничение {MAX_ANALYTICS_ISSUES})",
+            )
         if over_top:
             lines.append(f"• Больше всего превышений: {over_top[0]} ({over_top[1]})")
         if overdue_top:

@@ -56,7 +56,7 @@ class TestLegacyMigration(_DbTestCase):
     def test_legacy_user_is_not_returned_as_configured(self):
         self.insert_legacy_user("old@example.com")
         self.assertIsNone(self.db.get_user_jira_settings("old@example.com"))
-        self.assertEqual([("old@example.com", "uid1")], self.db.get_legacy_users_to_notify())
+        self.assertEqual([("old@example.com", "uid1", "password")], self.db.get_legacy_users_to_notify())
 
     def test_disable_legacy_user_wipes_password_and_marks_notified(self):
         self.insert_legacy_user("old@example.com")
@@ -73,7 +73,7 @@ class TestLegacyMigration(_DbTestCase):
     def test_undelivered_notification_is_retried(self):
         self.insert_legacy_user("old@example.com")
         self.db.disable_legacy_user("old@example.com", notified=False)
-        self.assertEqual([("old@example.com", "uid1")], self.db.get_legacy_users_to_notify())
+        self.assertEqual([("old@example.com", "uid1", "password")], self.db.get_legacy_users_to_notify())
 
     def test_login_with_pat_replaces_legacy_settings(self):
         self.insert_legacy_user("old@example.com")

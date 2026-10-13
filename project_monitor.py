@@ -215,7 +215,7 @@ class ProjectMonitor:
         """Получить все задачи проекта через персональное подключение"""
         try:
             # Используем персональное подключение пользователя
-            issues = user_jira_client.get_project_issues(user_email, project_key)
+            issues = user_jira_client.get_issues_for_monitoring(user_email, project_key)
 
             if issues is None:
                 logger.error(f"Не удалось получить задачи проекта {project_key} для пользователя {user_email}")
@@ -281,20 +281,23 @@ class ProjectMonitor:
             if not self.is_issue_closed(issue):
                 return False
 
-            # Ищем в истории изменений когда задача была закрыта
-            if hasattr(issue, "changelog") and issue.changelog:
-                for history in issue.changelog.histories:
-                    for item in history.items:
-                        if item.field == "status" and item.toString in self.closed_statuses:
-                            # Парсим дату изменения статуса
-                            changed_date = datetime.strptime(history.created[:10], "%Y-%m-%d")
-                            yesterday = datetime.now() - timedelta(days=1)
-                            yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+            if not (hasattr(issue, "changelog") and issue.changelog):
+                return False
 
-                            # Задача закрыта не раньше вчера
-                            return changed_date >= yesterday
+            # Ищем в истории изменений последнее закрытие (задачу могли переоткрыть и закрыть снова)
+            close_dates = [
+                datetime.strptime(history.created[:10], "%Y-%m-%d")
+                for history in issue.changelog.histories
+                for item in history.items
+                if item.field == "status" and item.toString in self.closed_statuses
+            ]
+            if not close_dates:
+                return False
 
-            return False
+            yesterday = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+            # Задача закрыта не раньше вчера
+            return max(close_dates) >= yesterday
 
         except Exception as e:
             logger.error(f"Ошибка проверки даты закрытия для {issue.key}: {e}")

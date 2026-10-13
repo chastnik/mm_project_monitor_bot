@@ -21,6 +21,10 @@ except ImportError:
     logger.warning("mattermost_client не доступен для отправки уведомлений")
 
 
+# Размер страницы при выгрузке задач (максимум, который по умолчанию отдает Jira Server / Data Center)
+JIRA_PAGE_SIZE = 1000
+
+
 def _is_auth_error(error: JIRAError) -> bool:
     """Ошибка аутентификации (неверный/истекший/отозванный токен)"""
     error_message = str(error).lower()
@@ -195,18 +199,51 @@ class UserJiraClient:
             logger.error(f"Ошибка получения информации о проекте {project_key}: {e}")
             return None
 
-    def get_project_issues(self, user_email: str, project_key: str, max_results: int = 200) -> list | None:
-        """Получить задачи проекта"""
+    def get_project_issues(self, user_email: str, project_key: str, max_results: int = 200) -> tuple[list, int] | None:
+        """Получить до max_results последних обновленных задач проекта.
+
+        Jira ограничивает размер одной страницы (обычно 1000), поэтому задачи выгружаются постранично.
+        Возвращает (задачи, общее количество задач в проекте) или None при ошибке.
+        """
+        jira_client = self.get_jira_client(user_email)
+        if not jira_client:
+            return None
+
+        jql = f'project = "{project_key}" ORDER BY updated DESC'
+        issues: list = []
+        total = 0
+        try:
+            while len(issues) < max_results:
+                page = jira_client.search_issues(
+                    jql,
+                    startAt=len(issues),
+                    maxResults=min(JIRA_PAGE_SIZE, max_results - len(issues)),
+                    expand="changelog",
+                )
+                total = page.total if page.total is not None else len(issues) + len(page)
+                issues.extend(page)
+                if not page or len(issues) >= total:
+                    break
+            return issues, total
+        except Exception as e:
+            logger.error(f"Ошибка получения задач проекта {project_key}: {e}")
+            return None
+
+    def get_issues_for_monitoring(self, user_email: str, project_key: str) -> list | None:
+        """Получить задачи проекта для ежедневного мониторинга.
+
+        Берутся все незакрытые задачи и задачи, обновленные за последние дни (недавно закрытые нужны
+        для проверки трудозатрат). Выгружаются все страницы, без ограничения по количеству.
+        """
         jira_client = self.get_jira_client(user_email)
         if not jira_client:
             return None
 
         try:
-            jql = f'project = "{project_key}" ORDER BY updated DESC'
-            issues = jira_client.search_issues(jql, maxResults=max_results, expand="changelog,worklog")
-            return issues
+            jql = f'project = "{project_key}" AND (statusCategory != Done OR updated >= -3d) ORDER BY updated DESC'
+            return jira_client.search_issues(jql, maxResults=False, expand="changelog")
         except Exception as e:
-            logger.error(f"Ошибка получения задач проекта {project_key}: {e}")
+            logger.error(f"Ошибка получения задач проекта {project_key} для мониторинга: {e}")
             return None
 
     def _add_to_cache(self, user_email: str, jira_client):

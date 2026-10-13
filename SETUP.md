@@ -21,7 +21,7 @@
 
 ## Требования
 
-- Python 3.8+
+- Python 3.12+ (рекомендуется 3.15 — на нем собирается Docker-образ)
 - Доступ к Mattermost API (бот токен)
 - Jira Server / Data Center 8.14+ с включенными Personal Access Tokens (каждый пользователь входит по своему PAT)
 
@@ -253,6 +253,10 @@ JIRA_VERIFY_SSL=true
 # Tempo API (опционально, для расширенной работы с временными метками)
 # TEMPO_API_URL=https://jira.your-company.com/rest/tempo-timesheets/4
 # TEMPO_API_TOKEN=your_tempo_token
+
+# Секрет для шифрования токенов Jira (обязательно): openssl rand -base64 32
+# Храните отдельно от БД; при смене ключа пользователям придется заново войти в Jira
+ENCRYPTION_KEY=сгенерированный_секрет
 
 # База данных
 DATABASE_PATH=standup_bot.db
