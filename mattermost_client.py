@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import websockets
 from mattermostdriver import Driver
 
+from auth_messages import mask_secrets, pat_instructions
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -351,14 +352,14 @@ class MattermostClient:
         # Проверяем точные упоминания и частичные совпадения
         for pattern in mention_patterns:
             if pattern.lower() in message_lower:
-                logger.info(f"🔍 Найдено упоминание бота: '{pattern}' в сообщении: '{message}'")
+                logger.info(f"🔍 Найдено упоминание бота: '{pattern}' в сообщении: '{mask_secrets(message)}'")
                 return True
 
         # Дополнительная проверка: ищем любые упоминания @username
         mentions = re.findall(r"@(\w+)", message)
         for mention in mentions:
             if mention.lower() in ["jora", "жора", "ask", self.bot_username.lower()]:
-                logger.info(f"🔍 Найдено упоминание через regex: '@{mention}' в сообщении: '{message}'")
+                logger.info(f"🔍 Найдено упоминание через regex: '@{mention}' в сообщении: '{mask_secrets(message)}'")
                 return True
 
         return False
@@ -399,6 +400,11 @@ class MattermostClient:
             ],
             "setup_jira": [
                 "setup_jira",
+                "login",
+                "войти",
+                "вход",
+                "токен",
+                "token",
                 "настрой jira",
                 "настрой подключение",
                 "jira настройка",
@@ -407,9 +413,10 @@ class MattermostClient:
             ],
             "test_jira": ["test_jira", "проверь jira", "тест jira", "проверь подключение"],
             "change_password": ["change_password", "смени пароль", "измени пароль", "новый пароль"],
+            "logout": ["logout", "выйти", "выход"],
             "history": ["history", "история", "история уведомлений", "что было"],
             "status": ["status", "статус", "как дела", "что происходит"],
-            "analytics": ["analytics", "аналитика", "аналитика проекта", "покажи аналитику"],
+            "analytics": ["analytics", "аналитика", "аналитика проекта", "покажи аналитику", "график", "chart"],
         }
 
         # Проверяем все алиасы команд
@@ -450,6 +457,11 @@ class MattermostClient:
             ],
             "setup_jira": [
                 "setup_jira",
+                "login",
+                "войти",
+                "вход",
+                "токен",
+                "token",
                 "настрой jira",
                 "настрой подключение",
                 "jira настройка",
@@ -458,9 +470,10 @@ class MattermostClient:
             ],
             "test_jira": ["test_jira", "проверь jira", "тест jira", "проверь подключение"],
             "change_password": ["change_password", "смени пароль", "измени пароль", "новый пароль"],
+            "logout": ["logout", "выйти", "выход"],
             "history": ["history", "история", "история уведомлений", "что было"],
             "status": ["status", "статус", "как дела", "что происходит"],
-            "analytics": ["analytics", "аналитика", "аналитика проекта", "покажи аналитику"],
+            "analytics": ["analytics", "аналитика", "аналитика проекта", "покажи аналитику", "график", "chart"],
         }
 
         for command, aliases in command_aliases.items():
@@ -476,7 +489,7 @@ class MattermostClient:
             user = self.driver.users.get_user(user_id)
             username = user.get("username", "Неизвестный")
 
-            logger.info(f"📨 Получено личное сообщение от {username}: {message}")
+            logger.info(f"📨 Получено личное сообщение от {username}: {mask_secrets(message)}")
 
             # Обрабатываем команды
             if self._is_command(message):
@@ -556,7 +569,7 @@ class MattermostClient:
                 return
 
             # Отладочная информация
-            logger.info(f"🔍 Отладка: message={message}, type={type(message)}")
+            logger.info(f"🔍 Отладка: message={mask_secrets(message)}, type={type(message)}")
 
             # Обрабатываем команду
             response = command_handler.handle_message(message, user_email, channel_type, channel_id, None, user_id)
@@ -586,52 +599,55 @@ class MattermostClient:
                 help_message = f"""
 🤖 **Привет! Я Project Monitor Bot**
 
-Я помогаю мониторить проекты в Jira и отслеживать превышение трудозатрат и просроченные сроки.
+Я помогаю мониторить проекты в Jira, отслеживать превышение трудозатрат и просроченные сроки, а также строю графики по проектам.
 
 **Основные команды (личные сообщения):**
-• `help` / `справка` / `помощь` - показать эту справку
-• `setup_jira username password` / `настрой jira username password` / `настрой джира username password` / `настрой джиру username password` - настроить подключение к Jira
-• `test_jira` / `проверь jira` / `тест jira` - проверить подключение к Jira
-• `list_projects` / `проекты` / `список проектов` - показать все доступные проекты в Jira
+• `help` / `справка` / `помощь` - полная справка
+• `login <PAT>` / `войти <PAT>` - войти в Jira по персональному токену
+• `test_jira` / `проверь jira` - проверить подключение к Jira
+• `list_projects` / `проекты` - показать все доступные проекты в Jira
+• `analytics PROJECT_KEY` / `графики PROJECT_KEY` - аналитика проекта с графиками
+• `logout` / `выйти` - удалить сохраненный токен
 
 **Для начала работы:**
-1. Настройте подключение к Jira: `setup_jira your_username your_password`
+1. Войдите в Jira по токену: `login <ваш_токен>`
 2. Проверьте подключение: `test_jira`
 3. В канале подпишитесь на проект: `@{self.bot_username} subscribe PROJECT_KEY`
 
-**Безопасность:** Все пароли шифруются AES-256 + PBKDF2HMAC
+{pat_instructions()}
 """
             else:
                 help_message = f"""
 🤖 **Привет! Я Project Monitor Bot**
 
-Я помогаю мониторить проекты в Jira и отслеживать превышение трудозатрат и просроченные сроки.
+Я помогаю мониторить проекты в Jira, отслеживать превышение трудозатрат и просроченные сроки, а также строю графики по проектам.
 
 **Основные команды (в каналах с упоминанием бота):**
 • `@{self.bot_username} help` / `@{self.bot_username} справка`
-• `@{self.bot_username} setup_jira username password` / `@{self.bot_username} настрой jira username password`
 • `@{self.bot_username} test_jira` / `@{self.bot_username} проверь jira`
 • `@{self.bot_username} list_projects` / `@{self.bot_username} проекты`
 • `@{self.bot_username} subscribe PROJECT_KEY` / `@{self.bot_username} подпиши на проект PROJECT_KEY`
 • `@{self.bot_username} list_subscriptions` / `@{self.bot_username} подписки`
 • `@{self.bot_username} run_subscriptions` / `@{self.bot_username} проверь подписки`
+• `@{self.bot_username} analytics PROJECT_KEY` / `@{self.bot_username} графики PROJECT_KEY` - аналитика проекта с графиками
 
 **Для начала работы:**
 1. **Добавьте бота в канал** (если еще не добавлен)
-2. Настройте подключение к Jira в ЛС: `setup_jira your_username your_password`
+2. Войдите в Jira по персональному токену **в личных сообщениях** боту: `login <ваш_токен>`
 3. Проверьте подключение: `test_jira`
 4. В канале подпишитесь на проект: `@{self.bot_username} subscribe PROJECT_KEY`
 
 **⚠️ Важно:**
 • В каналах команды работают только с упоминанием бота: `@{self.bot_username} команда`
 • Бот должен быть добавлен в канал перед выполнением команд
+• Никогда не отправляйте токен Jira в общий канал — только в личные сообщения боту
 
 **Примеры команд в канале:**
 • `@{self.bot_username} подпиши на проект IDB`
+• `@{self.bot_username} графики IDB`
 • `@{self.bot_username} проверь подписки`
-• `@{self.bot_username} подписки`
 
-**Безопасность:** Все пароли шифруются AES-256 + PBKDF2HMAC
+**Безопасность:** вход в Jira по Personal Access Token, токены хранятся в зашифрованном виде
 """
 
             self.driver.posts.create_post({"channel_id": channel_id, "message": help_message})
@@ -649,12 +665,14 @@ class MattermostClient:
             # Подсказки на основе ключевых слов (адаптация под DM/канал)
             is_dm = self._is_direct_message(channel_id)
             prefix = "" if is_dm else f"@{self.bot_username} "
-            if any(word in message_lower for word in ["подписк", "проект", "монитор", "отслеж"]):
+            if any(word in message_lower for word in ["график", "аналит", "chart", "диаграм", "статистик"]):
+                suggestions.append(f"💡 Попробуйте: `{prefix}графики IDB` или `{prefix}analytics IDB`")
+            elif any(word in message_lower for word in ["подписк", "проект", "монитор", "отслеж"]):
                 suggestions.append(f"💡 Попробуйте: `{prefix}подпиши на проект IDB` или `{prefix}subscribe IDB`")
-            elif any(word in message_lower for word in ["jira", "настрой", "подключ", "джира", "джиру"]):
-                suggestions.append(
-                    f"💡 Попробуйте: `{prefix}настрой jira username password` или `{prefix}setup_jira username password`"
-                )
+            elif any(
+                word in message_lower for word in ["jira", "настрой", "подключ", "джира", "джиру", "пароль", "логин"]
+            ):
+                suggestions.append("💡 Войдите в Jira по персональному токену в личных сообщениях боту: `login <PAT>`")
             elif any(word in message_lower for word in ["провер", "тест", "статус"]):
                 suggestions.append(f"💡 Попробуйте: `{prefix}проверь jira` или `{prefix}test_jira`")
             elif any(word in message_lower for word in ["список", "подписк", "что"]):
@@ -666,7 +684,8 @@ class MattermostClient:
             else:
                 suggestions.append(f"💡 Попробуйте: `{prefix}проекты` для просмотра всех доступных проектов")
                 suggestions.append(f"💡 Или: `{prefix}подпиши на проект IDB` для подписки на проект")
-                suggestions.append(f"💡 Или: `{prefix}настрой jira username password` для настройки Jira")
+                suggestions.append(f"💡 Или: `{prefix}графики IDB` для графиков по проекту")
+                suggestions.append("💡 Или: `login <PAT>` в личных сообщениях боту для входа в Jira")
 
             help_message = f"""
 🤖 **Привет! Я Project Monitor Bot**
@@ -676,7 +695,8 @@ class MattermostClient:
 **Основные команды:**
 • `{prefix}проекты` - показать все доступные проекты в Jira
 • `{prefix}подпиши на проект IDB` - подписка на мониторинг проекта
-• `{prefix}настрой jira username password` - настройка подключения к Jira
+• `{prefix}графики IDB` - аналитика проекта с графиками
+• `login <PAT>` - вход в Jira по персональному токену (в личных сообщениях боту)
 • `{prefix}проверь jira` - проверка подключения к Jira
 • `{prefix}подписки` - показать активные подписки
 • `{prefix}проверь подписки` - запустить проверку подписок
@@ -684,7 +704,7 @@ class MattermostClient:
 **Подсказки:**
 {chr(10).join(suggestions)}
 
-**Для полной справки:** `@Jora help`
+**Для полной справки:** `{prefix}help`
 """
 
             self.driver.posts.create_post({"channel_id": channel_id, "message": help_message})

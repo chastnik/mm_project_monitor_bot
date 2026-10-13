@@ -57,6 +57,15 @@ class DatabaseManager:
                 with contextlib.suppress(sqlite3.OperationalError):
                     cursor.execute("ALTER TABLE user_jira_settings ADD COLUMN last_connection_error TEXT")
 
+                # Тип авторизации: 'pat' - Personal Access Token, 'password' - устаревший вход по логину/паролю.
+                # Все записи, созданные до перехода на PAT, получают 'password' и считаются отключенными.
+                with contextlib.suppress(sqlite3.OperationalError):
+                    cursor.execute("ALTER TABLE user_jira_settings ADD COLUMN auth_type TEXT DEFAULT 'password'")
+
+                # Когда пользователю отправлено уведомление о переходе на PAT
+                with contextlib.suppress(sqlite3.OperationalError):
+                    cursor.execute("ALTER TABLE user_jira_settings ADD COLUMN pat_migration_notified_at TIMESTAMP")
+
                 # Таблица подписок на проекты
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS project_subscriptions (
@@ -172,8 +181,8 @@ class DatabaseManager:
             return ""
         return text.strip()[:max_length]
 
-    def save_user_jira_settings(self, user_email: str, user_id: str, jira_username: str, jira_password: str) -> bool:
-        """Сохранить настройки подключения к Jira для пользователя"""
+    def save_user_jira_settings(self, user_email: str, user_id: str, jira_username: str, jira_token: str) -> bool:
+        """Сохранить настройки подключения к Jira (Personal Access Token) для пользователя"""
         # Валидация входных данных
         # Если email валидный - используем его, иначе используем user_id как идентификатор
         if self._validate_email(user_email):
@@ -187,18 +196,18 @@ class DatabaseManager:
         jira_username = self._sanitize_input(jira_username)
 
         # Проверка на пустые обязательные поля
-        if not all([user_email, user_id, jira_username, jira_password]):
+        if not all([user_email, user_id, jira_username, jira_token]):
             logger.error("Пустые обязательные поля при сохранении настроек Jira")
             return False
 
-        # Ограничение длины пароля
-        if len(jira_password) > 500:
-            logger.error("Пароль слишком длинный")
+        # Ограничение длины токена
+        if len(jira_token) > 500:
+            logger.error("Токен слишком длинный")
             return False
 
         try:
-            # Шифруем пароль перед сохранением
-            encrypted_password = password_crypto.encrypt_password(jira_password)
+            # Шифруем токен перед сохранением (хранится в колонке jira_password)
+            encrypted_token = password_crypto.encrypt_password(jira_token)
 
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -211,27 +220,29 @@ class DatabaseManager:
                     cursor.execute(
                         """
                         UPDATE user_jira_settings
-                        SET user_id = ?, jira_username = ?, jira_password = ?,
+                        SET user_id = ?, jira_username = ?, jira_password = ?, auth_type = 'pat',
                             connection_attempts = 0, is_blocked = 0,
                             blocked_at = NULL, last_connection_error = NULL,
+                            last_test_success = 1, last_test_at = CURRENT_TIMESTAMP,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE user_email = ?
                     """,
-                        (user_id, jira_username, encrypted_password, user_email),
+                        (user_id, jira_username, encrypted_token, user_email),
                     )
                 else:
                     # Создаем новую запись
                     cursor.execute(
                         """
                         INSERT INTO user_jira_settings
-                        (user_email, user_id, jira_username, jira_password, updated_at)
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        (user_email, user_id, jira_username, jira_password, auth_type,
+                         last_test_success, last_test_at, updated_at)
+                        VALUES (?, ?, ?, ?, 'pat', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """,
-                        (user_email, user_id, jira_username, encrypted_password),
+                        (user_email, user_id, jira_username, encrypted_token),
                     )
                 conn.commit()
                 logger.info(
-                    f"Настройки Jira сохранены для пользователя {user_email} (пароль зашифрован, счетчик попыток сброшен)"
+                    f"Настройки Jira сохранены для пользователя {user_email} (PAT зашифрован, счетчик попыток сброшен)"
                 )
                 return True
         except Exception as e:
@@ -239,7 +250,11 @@ class DatabaseManager:
             return False
 
     def get_user_jira_settings(self, user_email: str) -> tuple[str, str, str, str] | None:
-        """Получить настройки подключения к Jira для пользователя"""
+        """Получить настройки подключения к Jira (user_id, jira_username, PAT, last_test_success).
+
+        Возвращает только записи с авторизацией по PAT: устаревшие записи с логином/паролем
+        считаются отключенными.
+        """
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -249,7 +264,7 @@ class DatabaseManager:
                     """
                     SELECT user_id, jira_username, jira_password, last_test_success
                     FROM user_jira_settings
-                    WHERE user_email = ?
+                    WHERE user_email = ? AND auth_type = 'pat'
                 """,
                     (user_email,),
                 )
@@ -262,30 +277,20 @@ class DatabaseManager:
                         """
                         SELECT user_id, jira_username, jira_password, last_test_success
                         FROM user_jira_settings
-                        WHERE user_id = ?
+                        WHERE user_id = ? AND auth_type = 'pat'
                     """,
                         (user_id,),
                     )
                     result = cursor.fetchone()
 
                 if result:
-                    user_id, jira_username, encrypted_password, last_test_success = result
+                    user_id, jira_username, encrypted_token, last_test_success = result
 
-                    # Расшифровываем пароль
                     try:
-                        # Проверяем, зашифрован ли пароль
-                        if password_crypto.is_encrypted(encrypted_password):
-                            decrypted_password = password_crypto.decrypt_password(encrypted_password)
-                        else:
-                            # Если пароль не зашифрован (старые данные), используем как есть
-                            # но в логе отметим это
-                            decrypted_password = encrypted_password
-                            logger.warning(f"Пароль для {user_email} не зашифрован - требуется обновление")
-
-                        return (user_id, jira_username, decrypted_password, last_test_success)
-
+                        decrypted_token = password_crypto.decrypt_password(encrypted_token)
+                        return (user_id, jira_username, decrypted_token, last_test_success)
                     except Exception as decrypt_error:
-                        logger.error(f"Ошибка расшифровки пароля для {user_email}: {decrypt_error}")
+                        logger.error(f"Ошибка расшифровки токена для {user_email}: {decrypt_error}")
                         return None
 
                 return None
@@ -441,6 +446,62 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка получения информации о блокировке для {user_email}: {e}")
             return None
+
+    def get_legacy_users_to_notify(self) -> list[tuple[str, str]]:
+        """Пользователи со старой авторизацией (логин/пароль), которым еще не отправлено уведомление о PAT.
+
+        Возвращает список (user_email, user_id).
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT user_email, user_id FROM user_jira_settings
+                    WHERE COALESCE(auth_type, 'password') != 'pat' AND pat_migration_notified_at IS NULL
+                """
+                )
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения пользователей со старой авторизацией: {e}")
+            return []
+
+    def disable_legacy_user(self, user_email: str, notified: bool) -> bool:
+        """Отключить пользователя со старой авторизацией: удалить сохраненный пароль.
+
+        notified=True отмечает, что уведомление о переходе на PAT доставлено (повторно не отправляется).
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE user_jira_settings
+                    SET jira_password = '', auth_type = 'password', last_test_success = 0,
+                        pat_migration_notified_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_email = ? AND COALESCE(auth_type, 'password') != 'pat'
+                """,
+                    (notified, user_email),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка отключения пользователя {user_email}: {e}")
+            return False
+
+    def get_all_jira_users(self) -> list[tuple[str, str, str]]:
+        """Все пользователи с настройками Jira: (user_email, jira_username, auth_type)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT user_email, jira_username, COALESCE(auth_type, 'password') FROM user_jira_settings"
+                )
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения списка пользователей: {e}")
+            return []
 
     def delete_user_jira_settings(self, user_email: str) -> bool:
         """Удалить настройки Jira пользователя"""

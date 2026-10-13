@@ -5,6 +5,7 @@
 import logging
 import re
 
+from auth_messages import mask_secrets, pat_instructions, setup_required_message
 from database import db_manager
 from mattermost_client import mattermost_client
 from scheduler import scheduler
@@ -23,6 +24,7 @@ class BotCommandHandler:
             "setup_jira": self.cmd_setup_jira,
             "test_jira": self.cmd_test_jira,
             "change_password": self.cmd_change_password,
+            "logout": self.cmd_logout,
             "run_subscriptions": self.cmd_run_subscriptions,
             "monitor_now": self.cmd_monitor_now,
             "all_subscriptions": self.cmd_all_subscriptions,
@@ -50,13 +52,13 @@ class BotCommandHandler:
             return None
 
         # Отладочная информация
-        logger.info(f"🔍 bot_commands: message_text={message_text}, type={type(message_text)}")
+        logger.info(f"🔍 bot_commands: message_text={mask_secrets(message_text)}, type={type(message_text)}")
 
         # Проверяем тип message_text
         if isinstance(message_text, list):
-            logger.info(f"🔍 Преобразуем список в строку: {message_text}")
+            logger.info(f"🔍 Преобразуем список в строку: {mask_secrets(message_text)}")
             message_text = " ".join(message_text)
-            logger.info(f"🔍 Результат: {message_text}, type={type(message_text)}")
+            logger.info(f"🔍 Результат: {mask_secrets(message_text)}, type={type(message_text)}")
 
         # Убираем упоминание бота только в каналах и ТОЛЬКО в начале сообщения,
         # чтобы не ломать пароли/аргументы, начинающиеся с символа '@'
@@ -117,6 +119,11 @@ class BotCommandHandler:
             "показать проекты": "list_projects",
             "какие проекты": "list_projects",
             "setup_jira": "setup_jira",
+            "login": "setup_jira",
+            "войти": "setup_jira",
+            "вход": "setup_jira",
+            "токен": "setup_jira",
+            "token": "setup_jira",
             "настрой jira": "setup_jira",
             "настрой подключение": "setup_jira",
             "jira настройка": "setup_jira",
@@ -130,6 +137,9 @@ class BotCommandHandler:
             "смени пароль": "change_password",
             "измени пароль": "change_password",
             "новый пароль": "change_password",
+            "logout": "logout",
+            "выйти": "logout",
+            "выход": "logout",
             "run_subscriptions": "run_subscriptions",
             "проверь": "run_subscriptions",
             "проверь подписки": "run_subscriptions",
@@ -147,6 +157,12 @@ class BotCommandHandler:
             "аналитика": "analytics",
             "аналитика проекта": "analytics",
             "покажи аналитику": "analytics",
+            "графики": "analytics",
+            "график": "analytics",
+            "графики проекта": "analytics",
+            "покажи графики": "analytics",
+            "charts": "analytics",
+            "chart": "analytics",
             "monitor_now": "monitor_now",
             "запусти мониторинг": "monitor_now",
             "мониторинг сейчас": "monitor_now",
@@ -191,7 +207,9 @@ class BotCommandHandler:
                 # Передаем дополнительные параметры для команд подписки
                 if command in ["subscribe", "unsubscribe", "list_subscriptions", "run_subscriptions"]:
                     return self.commands[command](args, user_email, channel_id, team_id, user_id)
-                elif command in ["setup_jira", "test_jira", "change_password"]:
+                elif command == "setup_jira":
+                    return self.commands[command](args, user_email, user_id, channel_type)
+                elif command in ["test_jira", "change_password", "logout"]:
                     return self.commands[command](args, user_email, user_id)
                 elif command == "analytics":
                     return self.commands[command](args, user_email, channel_id, user_id)
@@ -208,7 +226,7 @@ class BotCommandHandler:
     ) -> str:
         """Показать расширенную аналитику проекта в Jira"""
         if not args:
-            return "❌ Укажите ключ проекта: `аналитика PROJECT_KEY` или `analytics PROJECT_KEY`"
+            return "❌ Укажите ключ проекта: `analytics PROJECT_KEY`, `аналитика PROJECT_KEY` или `графики PROJECT_KEY`"
         # Нормализуем: пропустим служебные слова и возьмём последний валидный токен
         import re
 
@@ -227,9 +245,7 @@ class BotCommandHandler:
         # Проверяем настройки Jira пользователя
         settings = db_manager.get_user_jira_settings(user_email)
         if not settings:
-            return """❌ **Настройки Jira не найдены**
-
-Сначала настройте подключение командой: `setup_jira <username> <password>`"""
+            return setup_required_message()
 
         if not channel_id:
             return "❌ Команда доступна только в каналах или личных сообщениях с ботом"
@@ -253,7 +269,7 @@ class BotCommandHandler:
                     )
                 return None  # Сообщение уже отправлено через send_channel_message и upload_image
             else:
-                return f"❌ Не удалось получить аналитику для проекта {project_key}. Проверьте ключ проекта и ваше подключение к Jira."
+                return f"❌ Не удалось получить аналитику для проекта {project_key}. Проверьте ключ проекта и подключение к Jira (`test_jira`)."
 
         except Exception as e:
             logger.error(f"Ошибка выполнения команды аналитики для проекта {project_key}: {e}")
@@ -265,13 +281,17 @@ class BotCommandHandler:
 
         help_text = """📋 **Команды бота мониторинга проектов**
 
-**Настройка подключения к Jira:**
-• `setup_jira <username> <password>` - настроить подключение к Jira
+**Вход в Jira (Personal Access Token):**
+• `login <PAT>` / `войти <PAT>` - войти в Jira по персональному токену (только в личных сообщениях)
 • `test_jira` - проверить подключение к Jira
-• `change_password <new_password>` - изменить пароль для Jira
+• `setup_jira` - показать текущее подключение
+• `logout` / `выйти` - удалить сохраненный токен
 
 **Просмотр проектов:**
 • `list_projects` - показать все доступные проекты в Jira
+
+**Аналитика и графики:**
+• `analytics PROJECT_KEY` / `аналитика PROJECT_KEY` / `графики PROJECT_KEY` - аналитика проекта с графиками (задачи, трудозатраты, создано/закрыто за 6 месяцев)
 
 **Управление подписками на проекты:**
 • `subscribe <PROJECT_KEY>` - подписать канал на мониторинг проекта
@@ -281,11 +301,10 @@ class BotCommandHandler:
 **Управление мониторингом:**
 • `run_subscriptions` - запустить проверку подписок текущего канала
 • `history` - история уведомлений за последние дни
-• `status` - статус бота и активные подписки
+• `status` - статус бота и вашего подключения к Jira
 
 **Информационные команды:**
 • `help` - показать эту справку
-• `analytics PROJECT_KEY` / `аналитика PROJECT_KEY` - расширенная аналитика проекта (с графиками)
 
 """
 
@@ -303,17 +322,19 @@ class BotCommandHandler:
 
 """
 
-        help_text += """**Примеры использования:**
-• `setup_jira myuser mypassword` - настроить подключение к Jira
+        help_text += f"""**Примеры использования:**
+• `login <ваш_токен>` - войти в Jira по токену
 • `list_projects` - посмотреть все доступные проекты
 • `subscribe MYPROJ` - подписаться на мониторинг проекта MYPROJ
-• `test_jira` - проверить подключение
+• `графики MYPROJ` - получить графики по проекту MYPROJ
 
 **Что мониторит бот:**
 🚨 **Превышение трудозатрат** - когда фактическое время превышает плановое
 ⏰ **Просроченные сроки** - когда срок выполнения задачи истек, а она не закрыта
 
-ℹ️ **Важно:** Каждый пользователь должен настроить свое подключение к Jira перед созданием подписок."""
+ℹ️ **Важно:** Каждый пользователь должен войти в Jira по своему токену перед созданием подписок.
+
+{pat_instructions()}"""
 
         return help_text
 
@@ -337,10 +358,7 @@ class BotCommandHandler:
         # Проверяем настройки Jira пользователя
         settings = db_manager.get_user_jira_settings(user_email)
         if not settings:
-            return """❌ **Настройки Jira не найдены**
-
-Перед подпиской на проекты необходимо настроить подключение к Jira.
-Используйте команду: `setup_jira`"""
+            return setup_required_message()
 
         try:
             from user_jira_client import user_jira_client
@@ -436,9 +454,11 @@ class BotCommandHandler:
             # Получаем клиент Jira для пользователя
             jira_client = user_jira_client.get_jira_client(user_email)
             if not jira_client:
+                if not db_manager.get_user_jira_settings(user_email):
+                    return setup_required_message()
                 return """❌ **Не удалось подключиться к Jira**
 
-Сначала настройте подключение командой: `setup_jira username password`"""
+Возможно, ваш токен истек или был отозван. Создайте новый токен и выполните `login <новый_токен>`."""
 
             # Получаем все проекты через paginated endpoint
             # Jira API отдает проекты страницами, поэтому идем по всем страницам
@@ -533,76 +553,74 @@ class BotCommandHandler:
             logger.error(f"Ошибка получения списка проектов: {e}")
             return f"❌ **Ошибка получения проектов:** {e!s}"
 
-    def cmd_setup_jira(self, args: list[str], user_email: str, user_id: str | None = None) -> str:
-        """Настроить подключение к Jira"""
+    def cmd_setup_jira(
+        self, args: list[str], user_email: str, user_id: str | None = None, channel_type: str = "D"
+    ) -> str:
+        """Войти в Jira по Personal Access Token"""
         if not user_id:
             return "❌ Ошибка получения ID пользователя"
 
-        # Проверяем, есть ли уже настройки
-        existing_settings = db_manager.get_user_jira_settings(user_email)
-
         if not args:
+            existing_settings = db_manager.get_user_jira_settings(user_email)
             if existing_settings:
                 _, jira_username, _, last_test_success = existing_settings
                 status = "✅ работает" if last_test_success else "❌ ошибка"
-                return f"""🔧 **Текущие настройки Jira:**
+                return f"""🔧 **Текущее подключение к Jira:**
 
-👤 **Пользователь:** {jira_username}
+👤 **Пользователь Jira:** {jira_username}
+🔑 **Авторизация:** Personal Access Token
 🔗 **Статус:** {status}
 
-Для изменения настроек используйте:
-`setup_jira <username> <password>`
+Для смены токена: `login <новый_токен>`
+Для проверки подключения: `test_jira`
+Для выхода: `logout`"""
+            return f"""🔧 **Вход в Jira**
 
-Для проверки подключения: `test_jira`"""
-            else:
-                return """🔧 **Настройка подключения к Jira**
+{pat_instructions()}"""
 
-Для настройки подключения используйте:
-`setup_jira <username> <password>`
+        if channel_type != "D":
+            return """⚠️ **Не отправляйте токен в общий канал!**
 
-**Пример:**
-`setup_jira myusername mypassword`
+Токен сохранен не будет. Так как сообщение с токеном уже видно участникам канала, **отзовите этот токен** в Jira (Профиль → Personal Access Tokens → Revoke), создайте новый и отправьте его боту **в личные сообщения**: `login <токен>`"""
 
-⚠️ **Безопасность:** Настройки сохраняются в зашифрованном виде."""
+        if len(args) > 1:
+            return f"""❌ **Вход по логину и паролю больше не поддерживается**
 
-        if len(args) < 2:
-            return "❌ Укажите логин и пароль: `setup_jira <username> <password>`"
+Отправьте только персональный токен: `login <PAT>`
 
-        jira_username = args[0]
-        jira_password = " ".join(args[1:])  # Пароль может содержать пробелы
+{pat_instructions()}"""
 
-        # Сохраняем настройки
-        success = db_manager.save_user_jira_settings(user_email, user_id, jira_username, jira_password)
+        token = args[0].strip()
 
-        if success:
-            # Тестируем подключение
-            from user_jira_client import user_jira_client
+        from user_jira_client import user_jira_client
 
-            test_success, test_message = user_jira_client.test_connection(user_email)
+        jira_username, error = user_jira_client.verify_token(token)
+        if not jira_username:
+            return f"""❌ **Не удалось войти в Jira по токену**
 
-            if test_success:
-                return f"""✅ **Настройки Jira сохранены и проверены!**
+{error}
 
-👤 **Пользователь:** {jira_username}
+Проверьте, что токен скопирован полностью и не истек. Если нужно — создайте новый:
+{pat_instructions()}"""
+
+        if not db_manager.save_user_jira_settings(user_email, user_id, jira_username, token):
+            return "❌ Ошибка сохранения токена Jira"
+
+        user_jira_client.clear_user_cache(user_email)
+        _test_success, test_message = user_jira_client.test_connection(user_email)
+
+        return f"""✅ **Вход в Jira выполнен!**
+
+👤 **Пользователь Jira:** {jira_username}
 🔗 **Статус:** {test_message}
 
-Теперь вы можете подписываться на проекты командой `subscribe PROJECT_KEY`"""
-            else:
-                return f"""⚠️ **Настройки сохранены, но есть проблема с подключением:**
-
-❌ {test_message}
-
-Проверьте логин/пароль и попробуйте снова."""
-        else:
-            return "❌ Ошибка сохранения настроек Jira"
+Теперь вы можете смотреть проекты (`list_projects`), графики (`графики PROJECT_KEY`) и подписывать каналы на мониторинг (`subscribe PROJECT_KEY`)."""
 
     def cmd_test_jira(self, args: list[str], user_email: str, user_id: str | None = None) -> str:
         """Проверить подключение к Jira"""
         settings = db_manager.get_user_jira_settings(user_email)
         if not settings:
-            return """❌ **Настройки Jira не найдены**
-
-Сначала настройте подключение командой: `setup_jira <username> <password>`"""
+            return setup_required_message()
 
         from user_jira_client import user_jira_client
 
@@ -612,43 +630,31 @@ class BotCommandHandler:
 
 {message}
 
-{("Вы можете создавать подписки на проекты!" if success else "Проверьте настройки командой `setup_jira`")}"""
+{("Вы можете создавать подписки на проекты!" if success else "Создайте новый токен в Jira и выполните `login <новый_токен>`")}"""
 
     def cmd_change_password(self, args: list[str], user_email: str, user_id: str | None = None) -> str:
-        """Изменить пароль для Jira"""
-        if not user_id:
-            return "❌ Ошибка получения ID пользователя"
+        """Устаревшая команда: пароли больше не используются"""
+        return f"""ℹ️ **Пароли больше не используются**
 
-        settings = db_manager.get_user_jira_settings(user_email)
-        if not settings:
-            return """❌ **Настройки Jira не найдены**
+Бот подключается к Jira по Personal Access Token. Чтобы сменить токен, выполните `login <новый_токен>`.
 
-Сначала настройте подключение командой: `setup_jira <username> <password>`"""
+{pat_instructions()}"""
 
-        if not args:
-            return "❌ Укажите новый пароль: `change_password <new_password>`"
+    def cmd_logout(self, args: list[str], user_email: str, user_id: str | None = None) -> str:
+        """Удалить сохраненный токен Jira"""
+        if not db_manager.get_user_jira_settings(user_email):
+            return "ℹ️ Вы не вошли в Jira — сохраненного токена нет"
 
-        new_password = " ".join(args)  # Пароль может содержать пробелы
-        _, jira_username, _, _ = settings
+        if not db_manager.delete_user_jira_settings(user_email):
+            return "❌ Ошибка удаления токена"
 
-        # Обновляем пароль
-        success = db_manager.save_user_jira_settings(user_email, user_id, jira_username, new_password)
+        from user_jira_client import user_jira_client
 
-        if success:
-            # Очищаем кеш подключения
-            from user_jira_client import user_jira_client
+        user_jira_client.clear_user_cache(user_email)
+        return """✅ **Вы вышли из Jira, токен удален**
 
-            user_jira_client.clear_user_cache(user_email)
-
-            # Тестируем новое подключение
-            test_success, test_message = user_jira_client.test_connection(user_email)
-
-            if test_success:
-                return f"✅ **Пароль обновлен и проверен!**\n\n{test_message}"
-            else:
-                return f"⚠️ **Пароль обновлен, но есть проблема:**\n\n❌ {test_message}"
-        else:
-            return "❌ Ошибка обновления пароля"
+Проверки по подпискам, которые вы создавали, будут приостановлены до нового входа: `login <PAT>`.
+Не забудьте отозвать токен в Jira, если он больше не нужен."""
 
     def cmd_all_subscriptions(self, args: list[str], user_email: str) -> str:
         """Показать все подписки в системе (только для администраторов)"""
@@ -698,26 +704,22 @@ class BotCommandHandler:
 
     def cmd_list_users(self, args: list[str], user_email: str) -> str:
         """Показать список пользователей с настройками Jira"""
-        # Получаем всех пользователей с настройками Jira из БД
-        try:
-            import sqlite3
-
-            with sqlite3.connect(db_manager.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT user_email, jira_username FROM user_jira_settings")
-                users = cursor.fetchall()
-        except Exception as e:
-            return f"❌ Ошибка получения списка пользователей: {e}"
+        users = db_manager.get_all_jira_users()
 
         if not users:
             return "📝 Нет пользователей с настройками Jira"
 
         message_parts = ["📝 **Пользователи с настройками Jira:**\n"]
 
-        for i, (email, jira_username) in enumerate(users, 1):
-            message_parts.append(f"{i}. {email} (Jira: {jira_username})")
+        pat_count = 0
+        for i, (email, jira_username, auth_type) in enumerate(users, 1):
+            if auth_type == "pat":
+                pat_count += 1
+                message_parts.append(f"{i}. {email} (Jira: {jira_username}, 🔑 PAT)")
+            else:
+                message_parts.append(f"{i}. {email} (Jira: {jira_username}, ⛔ отключен — требуется вход по PAT)")
 
-        message_parts.append(f"\n**Всего пользователей:** {len(users)}")
+        message_parts.append(f"\n**Всего пользователей:** {len(users)}, вошли по PAT: {pat_count}")
 
         return "\n".join(message_parts)
 
@@ -854,18 +856,16 @@ class BotCommandHandler:
 
         message_parts.append(f"**Mattermost:** {mm_status}")
 
-        # Тест Jira
-        try:
-            from jira_client import jira_client
+        # Подключение пользователя к Jira
+        settings = db_manager.get_user_jira_settings(user_email)
+        if not settings:
+            jira_status = "⚪ Вход не выполнен — `login <PAT>`"
+        elif settings[3]:
+            jira_status = f"🟢 Вход по PAT ({settings[1]})"
+        else:
+            jira_status = f"🔴 Ошибка подключения ({settings[1]}) — проверьте `test_jira`"
 
-            jira_status = "🟢 Подключен"
-            if jira_client.jira_client:
-                current_user = jira_client.jira_client.current_user()
-                jira_status += f" ({current_user})"
-        except Exception:
-            jira_status = "🔴 Ошибка подключения"
-
-        message_parts.append(f"**Jira:** {jira_status}")
+        message_parts.append(f"**Ваш Jira:** {jira_status}")
 
         # Статистика подписок
         subscriptions = db_manager.get_all_subscriptions()

@@ -7,6 +7,7 @@ import logging
 from jira import JIRA
 from jira.exceptions import JIRAError
 
+from auth_messages import token_invalid_block_message
 from config import config
 from database import db_manager
 
@@ -18,6 +19,26 @@ try:
 except ImportError:
     mattermost_client = None
     logger.warning("mattermost_client не доступен для отправки уведомлений")
+
+
+def _is_auth_error(error: JIRAError) -> bool:
+    """Ошибка аутентификации (неверный/истекший/отозванный токен)"""
+    error_message = str(error).lower()
+    return (
+        error.status_code in (401, 403)
+        or "authentication" in error_message
+        or "unauthorized" in error_message
+        or "credentials" in error_message
+    )
+
+
+def _create_client(token: str) -> JIRA:
+    """Создать клиент Jira Server/Data Center с авторизацией по Personal Access Token (Bearer)"""
+    return JIRA(
+        server=config.JIRA_URL,
+        token_auth=token,
+        options={"verify": config.JIRA_VERIFY_SSL, "timeout": 30},
+    )
 
 
 class UserJiraClient:
@@ -51,15 +72,11 @@ class UserJiraClient:
             logger.warning(f"Настройки Jira не найдены для пользователя {user_email}")
             return None
 
-        _user_id, jira_username, jira_password, _last_test_success = settings
+        _user_id, _jira_username, jira_token, _last_test_success = settings
 
         try:
-            # Создаем подключение с персональными настройками
-            jira_client = JIRA(
-                server=config.JIRA_URL,
-                basic_auth=(jira_username, jira_password),
-                options={"verify": config.JIRA_VERIFY_SSL, "timeout": 30},
-            )
+            # Создаем подключение с персональным токеном
+            jira_client = _create_client(jira_token)
 
             # Тестируем подключение
             current_user = jira_client.current_user()
@@ -76,14 +93,8 @@ class UserJiraClient:
         except JIRAError as e:
             # Обрабатываем ошибки аутентификации Jira
             error_message = str(e)
-            is_auth_error = (
-                e.status_code == 401
-                or "authentication" in error_message.lower()
-                or "unauthorized" in error_message.lower()
-                or "credentials" in error_message.lower()
-            )
 
-            if is_auth_error:
+            if _is_auth_error(e):
                 logger.warning(f"Ошибка аутентификации для {user_email}: {error_message}")
                 # Блокируем пользователя сразу при первой ошибке аутентификации
                 attempts, was_blocked = db_manager.increment_connection_attempts(user_email, error_message)
@@ -92,8 +103,8 @@ class UserJiraClient:
                     # Отправляем уведомление пользователю о блокировке
                     self._notify_user_about_block(user_email, attempts)
                     logger.error(
-                        f"Пользователь {user_email} заблокирован - неправильный пароль Jira. "
-                        f"Проверки приостановлены до смены пароля."
+                        f"Пользователь {user_email} заблокирован - недействительный токен Jira. "
+                        f"Проверки приостановлены до обновления токена."
                     )
             else:
                 # Другие ошибки не считаем как попытки аутентификации
@@ -116,25 +127,32 @@ class UserJiraClient:
             return
 
         try:
-            message = """🔒 **Проверки приостановлены — неправильный пароль Jira**
-
-Бот не смог подключиться к Jira с вашим текущим паролем.
-
-**Все автоматические проверки ваших проектов приостановлены** до обновления пароля.
-
-**Что делать:**
-1. Проверьте, не изменили ли вы пароль в Jira
-2. Обновите пароль в боте командой: `change_password <новый_пароль>`
-   или настройте подключение заново: `setup_jira <username> <новый_пароль>`
-
-После обновления пароля проверки возобновятся автоматически.
-
-Если проблема сохраняется, обратитесь к администратору."""
+            message = token_invalid_block_message()
 
             mattermost_client.send_direct_message_by_email(user_email, message)
             logger.info(f"Уведомление о блокировке отправлено пользователю {user_email}")
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления о блокировке пользователю {user_email}: {e}")
+
+    def verify_token(self, token: str) -> tuple[str | None, str | None]:
+        """Проверить Personal Access Token без сохранения.
+
+        Возвращает (имя пользователя Jira, None) при успехе или (None, текст ошибки).
+        """
+        try:
+            jira_client = _create_client(token)
+            current_user = jira_client.current_user()
+            if not current_user:
+                return None, "Jira не вернула пользователя для этого токена"
+            return current_user, None
+        except JIRAError as e:
+            if _is_auth_error(e):
+                return None, "Токен недействителен, истек или был отозван"
+            logger.error(f"Ошибка проверки токена Jira: {e}")
+            return None, f"Ошибка Jira: {e.text or e}"
+        except Exception as e:
+            logger.error(f"Ошибка проверки токена Jira: {e}")
+            return None, f"Не удалось подключиться к Jira: {e!s}"
 
     def test_connection(self, user_email: str) -> tuple[bool, str]:
         """Тестировать подключение к Jira для пользователя"""
@@ -152,7 +170,7 @@ class UserJiraClient:
 
                 return True, f"✅ Подключение успешно! Пользователь: {current_user}, доступно проектов: {len(projects)}"
             else:
-                return False, "❌ Не удалось подключиться к Jira. Проверьте настройки."
+                return False, "❌ Не удалось подключиться к Jira. Возможно, токен истек или был отозван."
 
         except Exception as e:
             logger.error(f"Ошибка тестирования подключения для {user_email}: {e}")

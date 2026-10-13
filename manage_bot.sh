@@ -70,7 +70,7 @@ show_help() {
     print_warning "ВАЖНО: Настройка безопасности"
     echo "• Глобальные пароли Jira больше не требуются в .env"
     echo "• Каждый пользователь настраивает доступ через бота:"
-    echo "  - Отправьте боту: setup_jira <username> <password>"
+    echo "  - Отправьте боту: login <PAT> (Personal Access Token из профиля Jira)"
     echo "  - Проверьте: test_jira"
     echo "• Пароли шифруются и хранятся безопасно"
 }

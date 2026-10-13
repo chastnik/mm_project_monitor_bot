@@ -34,4 +34,5 @@ known-first-party = [
     "bot_commands",
     "calendar_client",
     "crypto_utils",
+    "auth_messages",
 ]
