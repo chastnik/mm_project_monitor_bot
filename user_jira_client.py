@@ -209,6 +209,23 @@ class UserJiraClient:
             logger.error(f"Ошибка получения задач проекта {project_key}: {e}")
             return None
 
+    def get_issues_for_monitoring(self, user_email: str, project_key: str) -> list | None:
+        """Получить задачи проекта для ежедневного мониторинга.
+
+        Берутся все незакрытые задачи и задачи, обновленные за последние дни (недавно закрытые нужны
+        для проверки трудозатрат). Выгружаются все страницы, без ограничения по количеству.
+        """
+        jira_client = self.get_jira_client(user_email)
+        if not jira_client:
+            return None
+
+        try:
+            jql = f'project = "{project_key}" AND (statusCategory != Done OR updated >= -3d) ORDER BY updated DESC'
+            return jira_client.search_issues(jql, maxResults=False, expand="changelog")
+        except Exception as e:
+            logger.error(f"Ошибка получения задач проекта {project_key} для мониторинга: {e}")
+            return None
+
     def _add_to_cache(self, user_email: str, jira_client):
         """Добавить подключение в кеш с управлением размером"""
         # Если кеш полный, удаляем самый старый элемент

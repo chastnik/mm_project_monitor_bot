@@ -21,6 +21,14 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
+def _parse_mattermost_url(url: str):
+    """Разобрать MATTERMOST_URL; адрес без схемы (chat.example.com) считается http, как и раньше"""
+    url = url.strip()
+    if "://" not in url:
+        url = f"http://{url}"
+    return urlparse(url)
+
+
 class MattermostClient:
     def __init__(self):
         self.driver = None
@@ -34,14 +42,16 @@ class MattermostClient:
     def _connect(self):
         """Подключение к Mattermost"""
         try:
-            # Простая настройка без сложных SSL конфигураций
+            # Берем хост, порт и путь из MATTERMOST_URL (например, https://chat.example.com:8065/mm)
+            parsed_url = _parse_mattermost_url(config.MATTERMOST_URL)
+            scheme = parsed_url.scheme
             self.driver = Driver(
                 {
-                    "url": config.MATTERMOST_URL.replace("https://", "").replace("http://", ""),
+                    "url": parsed_url.hostname,
                     "token": config.MATTERMOST_TOKEN,
-                    "scheme": "https" if "https" in config.MATTERMOST_URL else "http",
-                    "port": 443 if "https" in config.MATTERMOST_URL else 80,
-                    "basepath": "/api/v4",
+                    "scheme": scheme,
+                    "port": parsed_url.port or (443 if scheme == "https" else 80),
+                    "basepath": f"{parsed_url.path.rstrip('/')}/api/v4",
                     "verify": config.MATTERMOST_SSL_VERIFY,
                     "timeout": 30,
                 }
@@ -165,7 +175,8 @@ class MattermostClient:
     def is_user_admin(self, user_email: str) -> bool:
         """Проверить, является ли пользователь администратором"""
         admin_emails = config.ADMIN_EMAILS if config.ADMIN_EMAILS else []
-        return user_email.strip() in [email.strip() for email in admin_emails]
+        normalized_email = user_email.strip().lower()
+        return bool(normalized_email) and normalized_email in [email.strip().lower() for email in admin_emails]
 
     def start_listening(self):
         """Запуск прослушивания WebSocket сообщений"""
@@ -189,13 +200,13 @@ class MattermostClient:
     async def _connect_websocket(self):
         """Подключение к WebSocket"""
         # Парсим URL для WebSocket
-        parsed_url = urlparse(config.MATTERMOST_URL)
+        parsed_url = _parse_mattermost_url(config.MATTERMOST_URL)
 
         # Определяем схему WebSocket
         ws_scheme = "wss" if parsed_url.scheme == "https" else "ws"
         ws_port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
 
-        ws_url = f"{ws_scheme}://{parsed_url.hostname}:{ws_port}/api/v4/websocket"
+        ws_url = f"{ws_scheme}://{parsed_url.hostname}:{ws_port}{parsed_url.path.rstrip('/')}/api/v4/websocket"
 
         logger.info(f"🔌 Подключение к WebSocket: {ws_url}")
 
@@ -571,8 +582,11 @@ class MattermostClient:
             # Отладочная информация
             logger.info(f"🔍 Отладка: message={mask_secrets(message)}, type={type(message)}")
 
-            # Обрабатываем команду
-            response = command_handler.handle_message(message, user_email, channel_type, channel_id, None, user_id)
+            # Обрабатываем команду в отдельном потоке: команды ходят в Jira и строят графики,
+            # и не должны блокировать event loop (иначе WebSocket не отвечает на ping и рвется)
+            response = await asyncio.to_thread(
+                command_handler.handle_message, message, user_email, channel_type, channel_id, None, user_id
+            )
 
             # Отладочная информация о ответе команды
             logger.info(f"🔍 Ответ команды: {response}, тип: {type(response)}")

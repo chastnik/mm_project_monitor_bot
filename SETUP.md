@@ -21,7 +21,7 @@
 
 ## Требования
 
-- Python 3.8+
+- Python 3.12+ (рекомендуется 3.15 — на нем собирается Docker-образ)
 - Доступ к Mattermost API (бот токен)
 - Jira Server / Data Center 8.14+ с включенными Personal Access Tokens (каждый пользователь входит по своему PAT)
 

@@ -20,11 +20,15 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
+# Таймаут запросов к API, секунды. requests не поддерживает таймаут на уровне Session,
+# поэтому передаем его в каждый запрос
+REQUEST_TIMEOUT = 10
+
+
 class CalendarClient:
     def __init__(self, api_url: str | None = None):
         self.api_url = api_url or getattr(config, "CALENDAR_API_URL", "https://calendar.kuzyak.in")
         self.session = requests.Session()
-        self.session.timeout = 10
 
     # ── Базовые запросы к API ────────────────────────────────────────────
 
@@ -32,7 +36,7 @@ class CalendarClient:
         """Получить агрегированную информацию по месяцам на год"""
         try:
             url = f"{self.api_url}/api/calendar/{year}"
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -46,7 +50,7 @@ class CalendarClient:
         """
         try:
             url = f"{self.api_url}/api/calendar/{year}/{month:02d}/{day:02d}"
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:

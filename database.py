@@ -6,7 +6,7 @@ import contextlib
 import logging
 import re
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 from config import config
 from crypto_utils import password_crypto
@@ -638,43 +638,6 @@ class DatabaseManager:
             logger.error(f"Ошибка удаления подписки {project_key}/{channel_id}: {e}")
             return False
 
-    def update_user_ids(
-        self, email: str, mattermost_user_id: str | None = None, jira_account_id: str | None = None
-    ) -> bool:
-        """Обновить ID пользователя в Mattermost и Jira"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                updates = []
-                params = []
-
-                if mattermost_user_id:
-                    updates.append("mattermost_user_id = ?")
-                    params.append(mattermost_user_id)
-
-                if jira_account_id:
-                    updates.append("jira_account_id = ?")
-                    params.append(jira_account_id)
-
-                if updates:
-                    updates.append("updated_at = CURRENT_TIMESTAMP")
-                    params.append(email)
-
-                    # Безопасное построение запроса с проверкой колонок
-                    query = f"UPDATE monitored_users SET {', '.join(updates)} WHERE email = ?"
-                    cursor.execute(query, params)
-                    conn.commit()
-                    return cursor.rowcount > 0
-
-                return False
-        except sqlite3.OperationalError as e:
-            # Таблица может не существовать, если функционал не используется
-            logger.warning(f"Таблица monitored_users не найдена: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Ошибка обновления пользователя {email}: {e}")
-            return False
-
     def save_notification(
         self,
         project_key: str,
@@ -697,7 +660,7 @@ class DatabaseManager:
                     INSERT OR REPLACE INTO notification_history
                     (project_key, issue_key, notification_type, assignee_email, assignee_name,
                      channel_id, issue_summary, planned_hours, actual_hours, due_date, notification_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE('now'))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         project_key,
@@ -710,6 +673,8 @@ class DatabaseManager:
                         planned_hours,
                         actual_hours,
                         due_date,
+                        # Дата в часовом поясе бота (DATE('now') в SQLite - это UTC)
+                        date.today().isoformat(),
                     ),
                 )
                 conn.commit()
@@ -761,30 +726,43 @@ class DatabaseManager:
             logger.error(f"Ошибка обновления кеша для задачи {issue_key}: {e}")
             return False
 
-    def get_check_history(self, days: int = 7) -> list[tuple]:
-        """Получить историю проверок за последние дни"""
+    def get_notification_history(self, days: int = 7, channel_id: str | None = None) -> list[tuple]:
+        """История отправленных уведомлений за последние дни (по всем каналам или по одному каналу).
+
+        Возвращает (notification_date, project_key, issue_key, notification_type, assignee_name).
+        """
+        since = (date.today() - timedelta(days=days - 1)).isoformat()
+        query = """
+            SELECT notification_date, project_key, issue_key, notification_type, assignee_name
+            FROM notification_history
+            WHERE notification_date >= ?
+        """
+        params: list = [since]
+        if channel_id:
+            query += " AND channel_id = ?"
+            params.append(channel_id)
+        query += " ORDER BY notification_date DESC, project_key, issue_key"
+
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                # Используем параметризованный запрос для безопасности
-                cursor.execute(
-                    """
-                    SELECT ch.check_date, ch.user_email, mu.name, ch.has_worklog, ch.worklog_hours
-                    FROM check_history ch
-                    JOIN monitored_users mu ON ch.user_email = mu.email
-                    WHERE ch.check_date >= date('now', '-' || ? || ' days')
-                    ORDER BY ch.check_date DESC, ch.user_email
-                """,
-                    (days,),
-                )
+                cursor.execute(query, params)
                 return cursor.fetchall()
-        except sqlite3.OperationalError as e:
-            # Таблицы могут не существовать, если функционал не используется
-            logger.warning(f"Таблицы check_history или monitored_users не найдены: {e}")
-            return []
         except Exception as e:
-            logger.error(f"Ошибка получения истории проверок: {e}")
+            logger.error(f"Ошибка получения истории уведомлений: {e}")
             return []
+
+    def get_last_notification_date(self) -> str | None:
+        """Дата последнего отправленного уведомления"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT MAX(notification_date) FROM notification_history")
+                result = cursor.fetchone()
+                return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Ошибка получения даты последнего уведомления: {e}")
+            return None
 
     def save_calendar_holidays(
         self, year: int, holidays: list[date], descriptions: dict[date, str] | None = None
@@ -872,9 +850,11 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    INSERT OR REPLACE INTO calendar_metadata
-                    (year, last_check_date, updated_at)
+                    INSERT INTO calendar_metadata (year, last_check_date, updated_at)
                     VALUES (?, DATE('now'), CURRENT_TIMESTAMP)
+                    ON CONFLICT(year) DO UPDATE SET
+                        last_check_date = excluded.last_check_date,
+                        updated_at = excluded.updated_at
                 """,
                     (year,),
                 )

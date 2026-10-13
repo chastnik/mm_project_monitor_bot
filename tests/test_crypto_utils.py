@@ -14,7 +14,8 @@ class TestPasswordCryptoSaltPath(unittest.TestCase):
             data_dir = Path(tmp_dir) / "data"
             readonly_dir.mkdir()
             data_dir.mkdir()
-            readonly_dir.chmod(0o500)
+            # ".crypto_salt" в текущем каталоге - каталог, а не файл: использовать его нельзя даже под root
+            (readonly_dir / ".crypto_salt").mkdir()
 
             original_cwd = Path.cwd()
             original_database_path = os.environ.get("DATABASE_PATH")
@@ -71,9 +72,12 @@ class TestPasswordCryptoSaltPath(unittest.TestCase):
 
     def test_falls_back_to_tmp_when_all_project_paths_are_not_writable(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
+            # Делаем недоступными все пути внутри проекта так, чтобы это работало и под root:
+            # "data" - обычный файл (в нем нельзя создать salt), ".crypto_salt" - каталог (его нельзя прочитать)
             readonly_dir = Path(tmp_dir) / "readonly"
             readonly_dir.mkdir()
-            readonly_dir.chmod(0o500)
+            (readonly_dir / "data").touch()
+            (readonly_dir / ".crypto_salt").mkdir()
 
             original_cwd = Path.cwd()
             original_database_path = os.environ.get("DATABASE_PATH")

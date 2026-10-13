@@ -1,12 +1,11 @@
 mattermostdriver>=7.3.2
-requests>=2.31.0
-schedule>=1.2.0
-python-dotenv>=1.0.0
-cryptography>=45.0.0
-jira>=3.5.0
-aiohttp>=3.8.0
-websockets>=11.0.0
+requests>=2.34.2
+schedule>=1.2.2
+python-dotenv>=1.2.4
+cryptography>=50.0.2
+jira>=3.10.5
+websockets>=17.2
 
 # Для аналитики и построения графиков
-matplotlib>=3.8.0
-pillow>=10.0.0
+matplotlib>=3.11.2
+pillow>=12.3.0

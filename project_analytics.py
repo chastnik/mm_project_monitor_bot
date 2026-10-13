@@ -59,7 +59,9 @@ class ProjectAnalytics:
 
         created_per_month: dict[str, int] = {}
         closed_per_month: dict[str, int] = {}
-        six_months_ago = (today.replace(day=1) - timedelta(days=180)).replace(day=1)
+        # Первое число месяца, отстоящего на 5 месяцев назад: в графике 6 месяцев, включая текущий
+        start_month_index = today.year * 12 + today.month - 1 - 5
+        six_months_ago = today.replace(year=start_month_index // 12, month=start_month_index % 12 + 1, day=1)
 
         assignee_total: dict[str, int] = {}
         assignee_open: dict[str, int] = {}
