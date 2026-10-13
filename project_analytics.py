@@ -16,6 +16,9 @@ from user_jira_client import user_jira_client
 
 logger = logging.getLogger(__name__)
 
+# Сколько последних обновленных задач проекта учитывается в аналитике
+MAX_ANALYTICS_ISSUES = 5000
+
 
 class ProjectAnalytics:
     def __init__(self):
@@ -23,9 +26,10 @@ class ProjectAnalytics:
 
     def build_project_analytics(self, user_email: str, project_key: str) -> tuple[str, str | None]:
         """Собрать текстовый отчет и сгенерировать .jpg с графиками"""
-        issues = user_jira_client.get_project_issues(user_email, project_key, max_results=1000)
-        if not issues:
+        result = user_jira_client.get_project_issues(user_email, project_key, max_results=MAX_ANALYTICS_ISSUES)
+        if not result or not result[0]:
             return f"ℹ️ Нет данных по проекту {project_key} или нет доступа", None
+        issues, total_in_project = result
 
         # Метрики
         total = len(issues)
@@ -178,6 +182,12 @@ class ProjectAnalytics:
             f"• С превышением трудозатрат: {over_estimate_count}",
             f"• Просроченных: {overdue_count}",
         ]
+        if total_in_project > total:
+            lines.insert(
+                1,
+                f"⚠️ Учтены {total} последних обновленных задач из {total_in_project} "
+                f"(ограничение {MAX_ANALYTICS_ISSUES})",
+            )
         if over_top:
             lines.append(f"• Больше всего превышений: {over_top[0]} ({over_top[1]})")
         if overdue_top:

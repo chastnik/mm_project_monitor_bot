@@ -1,9 +1,13 @@
 """
-Утилиты для шифрования и дешифрования паролей пользователей
+Утилиты для шифрования и дешифрования токенов пользователей.
+
+Ключ шифрования выводится из секрета ENCRYPTION_KEY (переменная окружения) и соли из файла .crypto_salt.
+Секрет хранится отдельно от базы данных: без него токены из БД расшифровать нельзя.
 """
 
 import base64
 import hashlib
+import hmac
 import logging
 import os
 import tempfile
@@ -16,12 +20,43 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 logger = logging.getLogger(__name__)
 
+# Минимальная длина секрета ENCRYPTION_KEY
+MIN_ENCRYPTION_KEY_LENGTH = 16
+
+
+class EncryptionKeyMissingError(RuntimeError):
+    """Не задан секрет ENCRYPTION_KEY"""
+
+
+def get_encryption_secret() -> str | None:
+    """Секрет для шифрования токенов из переменной окружения ENCRYPTION_KEY"""
+    secret = os.getenv("ENCRYPTION_KEY", "").strip()
+    return secret or None
+
 
 class PasswordCrypto:
     def __init__(self):
         self.salt = self._get_or_create_salt()
-        self.key = self._derive_key()
-        self.cipher = Fernet(self.key)
+        self.key = None
+        self.cipher = None
+
+        secret = get_encryption_secret()
+        if secret:
+            self.key = self._derive_key(secret)
+            self.cipher = Fernet(self.key)
+        else:
+            # Не падаем при импорте: main.py проверяет ENCRYPTION_KEY при запуске и сообщает понятную ошибку
+            logger.warning("ENCRYPTION_KEY не задан - шифрование токенов недоступно")
+
+    def _require_cipher(self) -> Fernet:
+        if self.cipher is None:
+            raise EncryptionKeyMissingError("Не задан ENCRYPTION_KEY - шифрование токенов недоступно")
+        return self.cipher
+
+    def key_fingerprint(self) -> str:
+        """Отпечаток ключа шифрования: позволяет обнаружить смену ключа, не раскрывая сам ключ"""
+        self._require_cipher()
+        return hmac.new(self.key, b"project-monitor-bot:key-fingerprint", hashlib.sha256).hexdigest()
 
     def _get_or_create_salt(self) -> bytes:
         """Получить или создать соль для шифрования"""
@@ -82,12 +117,9 @@ class PasswordCrypto:
             seen.add(path)
         return unique_candidates
 
-    def _derive_key(self) -> bytes:
-        """Создать ключ шифрования из соли"""
-        # Используем фиксированный пароль + соль для создания ключа
-        # В продакшене лучше использовать переменную окружения
-        base_password = "MM_STANDUP_BOT_ENCRYPTION_KEY_2024"
-        base_password_bytes = base_password.encode()
+    def _derive_key(self, secret: str) -> bytes:
+        """Создать ключ шифрования из секрета ENCRYPTION_KEY и соли"""
+        base_password_bytes = secret.encode()
         iterations = 100000
 
         try:
@@ -128,7 +160,7 @@ class PasswordCrypto:
             if not password:
                 return ""
 
-            encrypted_data = self.cipher.encrypt(password.encode("utf-8"))
+            encrypted_data = self._require_cipher().encrypt(password.encode("utf-8"))
             # Кодируем в base64 для хранения в БД
             return base64.urlsafe_b64encode(encrypted_data).decode("utf-8")
 
@@ -144,21 +176,12 @@ class PasswordCrypto:
 
             # Декодируем из base64
             encrypted_data = base64.urlsafe_b64decode(encrypted_password.encode("utf-8"))
-            decrypted_data = self.cipher.decrypt(encrypted_data)
+            decrypted_data = self._require_cipher().decrypt(encrypted_data)
             return decrypted_data.decode("utf-8")
 
         except Exception as e:
             logger.error(f"Ошибка расшифровки пароля: {e}")
             raise e from None
-
-    def is_encrypted(self, password_data: str) -> bool:
-        """Проверить, зашифрован ли пароль"""
-        try:
-            # Попытаемся расшифровать
-            self.decrypt_password(password_data)
-            return True
-        except Exception:
-            return False
 
 
 # Глобальный экземпляр для использования в приложении

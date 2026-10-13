@@ -57,6 +57,9 @@ else
     echo "ℹ️ Файл .env уже существует, пропускаем"
 fi
 
+# Секрет для шифрования токенов Jira генерируем автоматически
+sudo -u standup-bot "$INSTALL_DIR/deploy/ensure_encryption_key.sh" "$INSTALL_DIR/.env"
+
 # Устанавливаем systemd сервис
 echo "🔧 Установка systemd сервиса..."
 sudo cp systemd/standup-bot.service $SERVICE_FILE

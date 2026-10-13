@@ -137,7 +137,8 @@ class TestAnalyticsMonths(unittest.TestCase):
                 created=created,
             )
         )
-        project_analytics.user_jira_client.get_project_issues.return_value = [issue]
+        fake_client = MagicMock()
+        fake_client.get_project_issues.return_value = ([issue], 1)
 
         captured = {}
         real_subplots = project_analytics.plt.subplots
@@ -151,6 +152,8 @@ class TestAnalyticsMonths(unittest.TestCase):
             tempfile.TemporaryDirectory() as out_dir,
             patch.object(project_analytics.config, "ARTIFACTS_DIR", out_dir, create=True),
             patch.object(project_analytics.plt, "subplots", side_effect=spy_subplots),
+            # Модуль мог быть импортирован другим тестом раньше - подменяем клиент Jira напрямую
+            patch.object(project_analytics, "user_jira_client", fake_client),
         ):
             _, image_path = project_analytics.ProjectAnalytics().build_project_analytics("u@example.com", "PROJ")
             self.assertTrue(os.path.exists(image_path))

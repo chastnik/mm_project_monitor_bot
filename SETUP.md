@@ -254,6 +254,10 @@ JIRA_VERIFY_SSL=true
 # TEMPO_API_URL=https://jira.your-company.com/rest/tempo-timesheets/4
 # TEMPO_API_TOKEN=your_tempo_token
 
+# Секрет для шифрования токенов Jira (обязательно): openssl rand -base64 32
+# Храните отдельно от БД; при смене ключа пользователям придется заново войти в Jira
+ENCRYPTION_KEY=сгенерированный_секрет
+
 # База данных
 DATABASE_PATH=standup_bot.db
 

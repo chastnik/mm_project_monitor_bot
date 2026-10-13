@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cryptography.fernet import InvalidToken
+
 
 class TestPasswordCryptoSaltPath(unittest.TestCase):
     def test_uses_database_directory_when_cwd_is_not_writable(self):
@@ -64,7 +66,7 @@ class TestPasswordCryptoSaltPath(unittest.TestCase):
         self.assertEqual(crypto.key, base64.urlsafe_b64encode(fallback_key))
         mock_pbkdf2.assert_called_once_with(
             "sha256",
-            b"MM_STANDUP_BOT_ENCRYPTION_KEY_2024",
+            os.environ["ENCRYPTION_KEY"].encode(),
             fixed_salt,
             100000,
             dklen=32,
@@ -105,3 +107,28 @@ class TestPasswordCryptoSaltPath(unittest.TestCase):
                 else:
                     os.environ["CRYPTO_SALT_FILE"] = original_salt_path
                 os.chdir(original_cwd)
+
+
+class TestEncryptionKey(unittest.TestCase):
+    def test_missing_key_does_not_break_import_but_blocks_encryption(self):
+        import crypto_utils
+
+        with patch.dict(os.environ, {"ENCRYPTION_KEY": ""}):
+            crypto = crypto_utils.PasswordCrypto()
+
+        with self.assertRaises(crypto_utils.EncryptionKeyMissingError):
+            crypto.encrypt_password("token")
+
+    def test_different_keys_give_different_fingerprints_and_cannot_decrypt(self):
+        import crypto_utils
+
+        with patch.dict(os.environ, {"ENCRYPTION_KEY": "first-secret-key-0123456789"}):
+            first = crypto_utils.PasswordCrypto()
+        with patch.dict(os.environ, {"ENCRYPTION_KEY": "second-secret-key-0123456789"}):
+            second = crypto_utils.PasswordCrypto()
+
+        encrypted = first.encrypt_password("token")
+        self.assertEqual("token", first.decrypt_password(encrypted))
+        self.assertNotEqual(first.key_fingerprint(), second.key_fingerprint())
+        with self.assertRaises(InvalidToken):
+            second.decrypt_password(encrypted)
