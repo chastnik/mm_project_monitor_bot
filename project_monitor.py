@@ -158,6 +158,13 @@ class ProjectMonitor:
             # subscription: (project_key, project_name, subscribed_by_email, created_at, active)
             subscribed_by_email = project_subscription[2]  # subscribed_by_email
 
+            if not db_manager.get_user_jira_settings(subscribed_by_email):
+                return (
+                    f"автор подписки ({subscribed_by_email}) не вошел в Jira по токену — "
+                    f"ему нужно выполнить `login <PAT>` в личных сообщениях боту, "
+                    f"либо переподпишите канал от своего имени: `subscribe {project_key}`"
+                )
+
             # Получаем все задачи проекта через персональное подключение
             issues = self.get_project_issues(subscribed_by_email, project_key)
 

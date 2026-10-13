@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import datetime
 
+from auth_messages import legacy_user_disabled_message, mask_secrets
 from bot_commands import command_handler
 from config import config
 from database import db_manager
@@ -63,6 +64,9 @@ class StandupBot:
 
             # Настраиваем WebSocket для получения сообщений
             self._setup_websocket()
+
+            # Отключаем пользователей со входом по логину/паролю и просим войти по PAT
+            self._notify_legacy_users()
 
             # Отправляем сообщение о запуске
             self._send_startup_message()
@@ -209,7 +213,9 @@ class StandupBot:
             message_text = post.get("message", "").strip()
 
             # Логируем получение сообщения для отладки
-            self.logger.debug(f"Получено сообщение от {user_email} в канале {channel_type}: {message_text[:50]}...")
+            self.logger.debug(
+                f"Получено сообщение от {user_email} в канале {channel_type}: {mask_secrets(message_text)[:50]}..."
+            )
 
             # Обрабатываем только личные сообщения или упоминания бота в каналах
             should_process = False
@@ -242,6 +248,37 @@ class StandupBot:
         """Обработка добавления пользователей в каналы - упрощенная версия"""
         # В упрощенной версии не требуется предварительное кеширование DM каналов
         pass
+
+    def _notify_legacy_users(self):
+        """Отключить пользователей со старой авторизацией (логин/пароль) и отправить им инструкцию по входу через PAT"""
+        legacy_users = db_manager.get_legacy_users_to_notify()
+        if not legacy_users:
+            return
+
+        self.logger.info(f"🔑 Пользователей со старой авторизацией для уведомления: {len(legacy_users)}")
+        message = legacy_user_disabled_message()
+        notified_count = 0
+
+        for user_email, user_id in legacy_users:
+            sent = False
+            try:
+                if user_id:
+                    sent = mattermost_client.send_direct_message(user_id, message)
+                if not sent and not user_email.startswith("user_"):
+                    sent = mattermost_client.send_direct_message_by_email(user_email, message)
+            except Exception as e:
+                self.logger.warning(
+                    f"Не удалось отправить уведомление о переходе на PAT пользователю {user_email}: {e}"
+                )
+
+            # Пароль удаляем в любом случае; недоставленное уведомление повторим при следующем запуске
+            db_manager.disable_legacy_user(user_email, notified=bool(sent))
+            if sent:
+                notified_count += 1
+            else:
+                self.logger.warning(f"Уведомление о переходе на PAT не доставлено пользователю {user_email}")
+
+        self.logger.info(f"✅ Уведомления о переходе на PAT отправлены: {notified_count} из {len(legacy_users)}")
 
     def _send_startup_message(self):
         """Отправить сообщение о запуске бота"""
@@ -276,13 +313,15 @@ class StandupBot:
 
 **Основные команды:**
 • `help` - справка по командам
-• `setup_jira username password` - настроить доступ к Jira
+• `login <PAT>` - войти в Jira по персональному токену (в личных сообщениях)
+• `list_projects` - список доступных проектов
+• `analytics PROJECT_KEY` / `графики PROJECT_KEY` - аналитика проекта с графиками
 • `subscribe PROJECT_KEY` - подписка на мониторинг проекта (в канале)
 • `list_subscriptions` - просмотр подписок канала
 
 **⚠️ Важно:** Для работы команд в каналах бот должен быть добавлен в канал!
 
-🔒 **Безопасность:** Пароли шифруются AES-256 + PBKDF2HMAC"""
+🔒 **Безопасность:** вход в Jira по Personal Access Token, токены хранятся в зашифрованном виде"""
             else:
                 mode_message = f"""🤖 **Project Monitor Bot запущен**
 
@@ -296,7 +335,7 @@ class StandupBot:
 • Уведомления о превышении трудозатрат
 • Уведомления о просроченных сроках
 
-🔒 **Безопасность:** Пароли шифруются AES-256 + PBKDF2HMAC"""
+🔒 **Безопасность:** вход в Jira по Personal Access Token, токены хранятся в зашифрованном виде"""
 
             mattermost_client.send_channel_message(config.MATTERMOST_CHANNEL_ID, mode_message)
 
