@@ -8,6 +8,7 @@ import os
 import re
 
 from auth_messages import mask_secrets, pat_instructions, setup_required_message
+from command_aliases import resolve_command
 from database import db_manager
 from mattermost_client import mattermost_client
 from scheduler import scheduler
@@ -50,17 +51,13 @@ class BotCommandHandler:
         Обработать сообщение пользователя
         channel_type: 'D' для личных сообщений, 'O' для открытых каналов
         """
-        if not message_text.strip():
+        if isinstance(message_text, list):
+            message_text = " ".join(message_text)
+
+        if not message_text or not message_text.strip():
             return None
 
-        # Отладочная информация
-        logger.info(f"🔍 bot_commands: message_text={mask_secrets(message_text)}, type={type(message_text)}")
-
-        # Проверяем тип message_text
-        if isinstance(message_text, list):
-            logger.info(f"🔍 Преобразуем список в строку: {mask_secrets(message_text)}")
-            message_text = " ".join(message_text)
-            logger.info(f"🔍 Результат: {mask_secrets(message_text)}, type={type(message_text)}")
+        logger.info(f"🔍 bot_commands: message_text={mask_secrets(message_text)}")
 
         # Убираем упоминание бота только в каналах и ТОЛЬКО в начале сообщения,
         # чтобы не ломать пароли/аргументы, начинающиеся с символа '@'
@@ -84,119 +81,10 @@ class BotCommandHandler:
         if not parts:
             return None
 
-        command = parts[0].lower()
-        args = parts[1:] if len(parts) > 1 else []
-
-        # Маппинг алиасов команд
-        command_aliases = {
-            "help": "help",
-            "справка": "help",
-            "помощь": "help",
-            "хелп": "help",
-            "команды": "help",
-            "что умеешь": "help",
-            "subscribe": "subscribe",
-            "подписка": "subscribe",
-            "подпиши": "subscribe",
-            "подпиши на проект": "subscribe",
-            "проект": "subscribe",
-            "мониторить": "subscribe",
-            "отслеживать": "subscribe",
-            "unsubscribe": "unsubscribe",
-            "отписка": "unsubscribe",
-            "отпиши": "unsubscribe",
-            "отпиши от проекта": "unsubscribe",
-            "не мониторить": "unsubscribe",
-            "не отслеживать": "unsubscribe",
-            "list_subscriptions": "list_subscriptions",
-            "подписки": "list_subscriptions",
-            "список подписок": "list_subscriptions",
-            "мои подписки": "list_subscriptions",
-            "что отслеживаешь": "list_subscriptions",
-            "list_projects": "list_projects",
-            "проекты": "list_projects",
-            "список проектов": "list_projects",
-            "все проекты": "list_projects",
-            "доступные проекты": "list_projects",
-            "показать проекты": "list_projects",
-            "какие проекты": "list_projects",
-            "setup_jira": "setup_jira",
-            "login": "setup_jira",
-            "войти": "setup_jira",
-            "вход": "setup_jira",
-            "токен": "setup_jira",
-            "token": "setup_jira",
-            "настрой jira": "setup_jira",
-            "настрой подключение": "setup_jira",
-            "jira настройка": "setup_jira",
-            "настрой джира": "setup_jira",
-            "настрой джиру": "setup_jira",
-            "test_jira": "test_jira",
-            "проверь jira": "test_jira",
-            "тест jira": "test_jira",
-            "проверь подключение": "test_jira",
-            "change_password": "change_password",
-            "смени пароль": "change_password",
-            "измени пароль": "change_password",
-            "новый пароль": "change_password",
-            "logout": "logout",
-            "выйти": "logout",
-            "выход": "logout",
-            "run_subscriptions": "run_subscriptions",
-            "проверь": "run_subscriptions",
-            "проверь подписки": "run_subscriptions",
-            "запусти проверку": "run_subscriptions",
-            "мониторинг": "run_subscriptions",
-            "history": "history",
-            "история": "history",
-            "история уведомлений": "history",
-            "что было": "history",
-            "status": "status",
-            "статус": "status",
-            "как дела": "status",
-            "что происходит": "status",
-            "analytics": "analytics",
-            "аналитика": "analytics",
-            "аналитика проекта": "analytics",
-            "покажи аналитику": "analytics",
-            "графики": "analytics",
-            "график": "analytics",
-            "графики проекта": "analytics",
-            "покажи графики": "analytics",
-            "charts": "analytics",
-            "chart": "analytics",
-            "monitor_now": "monitor_now",
-            "запусти мониторинг": "monitor_now",
-            "мониторинг сейчас": "monitor_now",
-            "проверь все": "monitor_now",
-            "проверь всё": "monitor_now",
-            "all_subscriptions": "all_subscriptions",
-            "все подписки": "all_subscriptions",
-            "все подписки системы": "all_subscriptions",
-            "delete_subscription": "delete_subscription",
-            "удали подписку": "delete_subscription",
-            "удалить подписку": "delete_subscription",
-            "list_users": "list_users",
-            "пользователи": "list_users",
-            "список пользователей": "list_users",
-            "кто подключен": "list_users",
-        }
-
-        # Преобразуем алиас в основную команду
-        # 1) Пробуем 3-словный, 2-словный алиасы, затем одно слово
-        multi_keys = []
-        if len(parts) >= 3:
-            multi_keys.append((parts[0] + " " + parts[1] + " " + parts[2]).lower())
-        if len(parts) >= 2:
-            multi_keys.append((parts[0] + " " + parts[1]).lower())
-        multi_keys.append(command)
-        for key in multi_keys:
-            if key in command_aliases:
-                command = command_aliases[key]
-                # Пересчитаем args, убрав количество слов, занятых алиасом
-                consumed = len(key.split())
-                args = parts[consumed:]
-                break
+        # Алиас -> основная команда; неизвестное первое слово остается как есть (покажем справку)
+        command, args = resolve_command(parts)
+        if command is None:
+            command, args = parts[0].lower(), parts[1:]
 
         # Проверяем права доступа для админских команд
         admin_commands = ["monitor_now", "all_subscriptions", "delete_subscription", "list_users"]
@@ -232,8 +120,6 @@ class BotCommandHandler:
         if not args:
             return "❌ Укажите ключ проекта: `analytics PROJECT_KEY`, `аналитика PROJECT_KEY` или `графики PROJECT_KEY`"
         # Нормализуем: пропустим служебные слова и возьмём последний валидный токен
-        import re
-
         tokens = [t for t in args if t and t.strip()]
         if tokens and tokens[0].lower() in ["проекта", "project", "проекта:", "project:"]:
             tokens = tokens[1:]
@@ -255,7 +141,6 @@ class BotCommandHandler:
             return "❌ Команда доступна только в каналах или личных сообщениях с ботом"
 
         try:
-            from mattermost_client import mattermost_client
             from project_analytics import ProjectAnalytics
 
             # Получаем аналитику и путь к изображению
@@ -378,6 +263,10 @@ class BotCommandHandler:
 
             project_key, project_name = project_info
 
+            denied = self._check_subscription_owner(project_key, channel_id, user_email)
+            if denied:
+                return denied
+
             # Подписываем канал
             success = db_manager.subscribe_to_project(
                 project_key, project_name, channel_id, team_id, user_id, user_email
@@ -400,6 +289,26 @@ class BotCommandHandler:
                 logger.error(f"Ошибка подписки на проект {project_key}: {e}")
                 return f"❌ Ошибка подписки на проект: {e!s}"
 
+    def _check_subscription_owner(self, project_key: str, channel_id: str, user_email: str) -> str | None:
+        """Изменять подписку может ее автор, администратор или любой пользователь, если автор больше не вошел в Jira.
+
+        Возвращает текст отказа или None, если действие разрешено.
+        """
+        existing = [sub for sub in db_manager.get_subscriptions_by_channel(channel_id) if sub[0] == project_key]
+        if not existing:
+            return None
+
+        owner = (existing[0][2] or "").strip().lower()
+        if not owner or owner == user_email.strip().lower() or mattermost_client.is_user_admin(user_email):
+            return None
+        if not db_manager.get_user_jira_settings(owner):
+            return None
+
+        return (
+            f"❌ Подписку на проект {project_key} в этом канале создал {owner}. "
+            f"Изменить ее может только автор или администратор бота"
+        )
+
     def cmd_unsubscribe(
         self,
         args: list[str],
@@ -416,6 +325,10 @@ class BotCommandHandler:
             return "❌ Команда доступна только в каналах"
 
         project_key = args[0].upper()
+
+        denied = self._check_subscription_owner(project_key, channel_id, user_email)
+        if denied:
+            return denied
 
         success = db_manager.unsubscribe_from_project(project_key, channel_id)
 
@@ -792,8 +705,11 @@ class BotCommandHandler:
         try:
             from project_monitor import project_monitor
 
-            project_monitor.monitor_all_projects()
-            return "✅ Мониторинг всех проектов запущен. Проверьте каналы с подписками на уведомления."
+            # Ручной запуск администратора выполняется независимо от выходных и праздников
+            errors = project_monitor.monitor_all_projects(force=True)
+            if errors:
+                return "⚠️ Мониторинг выполнен с ошибками:\n" + "\n".join(f"• {error}" for error in errors)
+            return "✅ Мониторинг всех проектов выполнен. Проверьте каналы с подписками на уведомления."
         except Exception as e:
             logger.error(f"Ошибка ручного мониторинга: {e}")
             return f"❌ Ошибка запуска мониторинга: {e!s}"

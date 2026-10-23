@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 10
 
 
+class CalendarLoadError(RuntimeError):
+    """Не удалось получить данные по части дней календаря: загруженный год был бы неполным"""
+
+
 class CalendarClient:
     def __init__(self, api_url: str | None = None):
         self.api_url = api_url or getattr(config, "CALENDAR_API_URL", "https://calendar.kuzyak.in")
@@ -132,31 +136,41 @@ class CalendarClient:
         )
 
         # Запрашиваем будние дни параллельно (до 10 потоков)
-        def _check_day(d: date) -> tuple[date, bool, str]:
-            """Запросить один день. Возвращает (дата, is_working, описание)."""
+        def _check_day(d: date) -> tuple[date, bool, str] | None:
+            """Запросить один день. Возвращает (дата, is_working, описание) или None при ошибке запроса."""
             try:
                 info = self.get_day_info(d.year, d.month, d.day)
-                if info:
-                    is_working = info.get("isWorkingDay", True)
-                    holiday_name = info.get("holiday", "")
-                    return d, is_working, holiday_name
-                return d, True, ""  # При ошибке считаем рабочим
             except Exception:
-                return d, True, ""
+                return None
+            if not info:
+                return None
+            return d, info.get("isWorkingDay", True), info.get("holiday", "")
+
+        failed_days = 0
 
         non_working_weekdays = 0
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(_check_day, d): d for d in weekdays_to_check}
             for future in as_completed(futures):
                 try:
-                    d, is_working, holiday_name = future.result()
+                    result = future.result()
+                    if result is None:
+                        failed_days += 1
+                        continue
+                    d, is_working, holiday_name = result
                     if not is_working:
                         holidays.add(d)
                         non_working_weekdays += 1
                         if holiday_name:
                             descriptions[d] = holiday_name
                 except Exception as e:
+                    failed_days += 1
                     logger.error(f"Ошибка при проверке дня: {e}")
+
+        if failed_days:
+            raise CalendarLoadError(
+                f"Календарь {year}: не удалось получить данные по {failed_days} из {len(weekdays_to_check)} будних дней"
+            )
 
         logger.info(
             f"Календарь {year}: найдено {non_working_weekdays} нерабочих будних дней (праздники/переносы), "

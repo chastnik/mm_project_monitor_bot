@@ -3,6 +3,8 @@
 """
 
 import logging
+import threading
+from collections import OrderedDict
 
 from jira import JIRA
 from jira.exceptions import JIRAError
@@ -26,14 +28,11 @@ JIRA_PAGE_SIZE = 1000
 
 
 def _is_auth_error(error: JIRAError) -> bool:
-    """Ошибка аутентификации (неверный/истекший/отозванный токен)"""
-    error_message = str(error).lower()
-    return (
-        error.status_code in (401, 403)
-        or "authentication" in error_message
-        or "unauthorized" in error_message
-        or "credentials" in error_message
-    )
+    """Ошибка аутентификации (неверный/истекший/отозванный токен): только HTTP 401.
+
+    403 (CAPTCHA, rate-limit, нет прав на ресурс) и сетевые ошибки токен недействительным не делают.
+    """
+    return error.status_code == 401
 
 
 def _create_client(token: str) -> JIRA:
@@ -47,9 +46,9 @@ def _create_client(token: str) -> JIRA:
 
 class UserJiraClient:
     def __init__(self, max_cache_size: int = 50):
-        self.jira_instances = {}  # Кеш подключений для разных пользователей
+        self.jira_instances: OrderedDict[str, JIRA] = OrderedDict()  # LRU-кеш подключений пользователей
         self.max_cache_size = max_cache_size
-        self.cache_access_order = []  # Для LRU кеша
+        self._cache_lock = threading.Lock()
 
     def get_jira_client(self, user_email: str) -> JIRA | None:
         """Получить клиент Jira для конкретного пользователя"""
@@ -66,9 +65,11 @@ class UserJiraClient:
             return None
 
         # Проверяем кеш
-        if user_email in self.jira_instances:
-            self._update_cache_access(user_email)
-            return self.jira_instances[user_email]
+        with self._cache_lock:
+            cached = self.jira_instances.get(user_email)
+            if cached is not None:
+                self.jira_instances.move_to_end(user_email)
+                return cached
 
         # Получаем настройки пользователя
         settings = db_manager.get_user_jira_settings(user_email)
@@ -162,8 +163,7 @@ class UserJiraClient:
         """Тестировать подключение к Jira для пользователя"""
         try:
             # Очищаем кеш для принудительного переподключения
-            if user_email in self.jira_instances:
-                del self.jira_instances[user_email]
+            self.clear_user_cache(user_email)
 
             jira_client = self.get_jira_client(user_email)
 
@@ -182,9 +182,10 @@ class UserJiraClient:
 
     def clear_user_cache(self, user_email: str):
         """Очистить кеш подключения для пользователя"""
-        if user_email in self.jira_instances:
-            del self.jira_instances[user_email]
-            logger.info(f"Кеш подключения очищен для {user_email}")
+        user_email = (user_email or "").strip().lower()
+        with self._cache_lock:
+            if self.jira_instances.pop(user_email, None) is not None:
+                logger.info(f"Кеш подключения очищен для {user_email}")
 
     def get_project_info(self, user_email: str, project_key: str) -> tuple[str, str] | None:
         """Получить информацию о проекте"""
@@ -247,29 +248,20 @@ class UserJiraClient:
             return None
 
     def _add_to_cache(self, user_email: str, jira_client):
-        """Добавить подключение в кеш с управлением размером"""
-        # Если кеш полный, удаляем самый старый элемент
-        if len(self.jira_instances) >= self.max_cache_size:
-            oldest_email = self.cache_access_order.pop(0)
-            if oldest_email in self.jira_instances:
-                del self.jira_instances[oldest_email]
+        """Добавить подключение в кеш с вытеснением наименее используемого"""
+        with self._cache_lock:
+            self.jira_instances[user_email] = jira_client
+            self.jira_instances.move_to_end(user_email)
+            while len(self.jira_instances) > self.max_cache_size:
+                oldest_email, _ = self.jira_instances.popitem(last=False)
                 logger.debug(f"Удален из кеша старый клиент для {oldest_email}")
-
-        self.jira_instances[user_email] = jira_client
-        self.cache_access_order.append(user_email)
-
-    def _update_cache_access(self, user_email: str):
-        """Обновить порядок доступа в кеше (LRU)"""
-        if user_email in self.cache_access_order:
-            self.cache_access_order.remove(user_email)
-        self.cache_access_order.append(user_email)
 
     def get_cache_stats(self) -> dict:
         """Получить статистику кеша"""
         return {
             "size": len(self.jira_instances),
             "max_size": self.max_cache_size,
-            "users": list(self.jira_instances.keys()),
+            "users": list(self.jira_instances),
         }
 
 

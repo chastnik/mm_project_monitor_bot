@@ -3,160 +3,121 @@
 """
 
 import logging
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from calendar_client import calendar_client
 from config import config
 from database import db_manager
+from jira_constants import CLOSED_STATUSES
 from mattermost_client import mattermost_client
 from user_jira_client import user_jira_client
 
 logger = logging.getLogger(__name__)
 
+TIME_EXCEEDED = "time_exceeded"
+DEADLINE_OVERDUE = "deadline_overdue"
+
+# Сколько задач помещается в одно сообщение-дайджест (лимит длины поста в Mattermost)
+DIGEST_CHUNK_SIZE = 15
+SUMMARY_MAX_LENGTH = 80
+
 
 class ProjectMonitor:
     def __init__(self):
-        self.closed_statuses = [
-            "Done",
-            "Closed",
-            "Resolved",
-            "Выполнено",
-            "Закрыто",
-            "Готово",
-            "Отменено",
-            "Отказ",
-            "Отклонено",
-            "Отклонен",
-            "Отклонена",
-            "Отклонены",
-            "Отложено",
-            "Не прошел испытательный срок",
-            "Выполнено частично",
-            "Отменён",
-            "Прошел испытательный срок",
-            "Отказ от оффера ",
-        ]
+        self.closed_statuses = CLOSED_STATUSES
 
-    def monitor_all_projects(self):
-        """Мониторинг всех активных проектов"""
+    def _is_working_day_today(self) -> bool:
+        """Рабочий ли сегодня день (выходные, производственный календарь в БД, затем API)"""
+        today = date.today()
+
+        if today.weekday() >= 5:
+            logger.info(f"Сегодня ({today}) выходной день (суббота/воскресенье) - мониторинг пропущен")
+            return False
+
+        if db_manager.is_holiday(today):
+            logger.info(f"Сегодня ({today}) праздничный день - мониторинг пропущен")
+            return False
+
+        # Дополнительная проверка через API (на случай, если календарь не загружен)
+        if not calendar_client.is_working_day(today):
+            logger.info(f"Сегодня ({today}) нерабочий день (проверено через API) - мониторинг пропущен")
+            return False
+
+        return True
+
+    def monitor_all_projects(self, force: bool = False) -> list[str]:
+        """Мониторинг всех активных подписок. force=True игнорирует выходные и праздники.
+
+        Возвращает список описаний ошибок (пустой, если все прошло успешно или мониторинг пропущен).
+        """
         logger.info("Начинаем мониторинг всех активных проектов")
 
-        try:
-            today = date.today()
+        if not force and not self._is_working_day_today():
+            return []
 
-            # Быстрая проверка: суббота (5) или воскресенье (6) — однозначно выходной
-            if today.weekday() >= 5:
-                logger.info(
-                    f"Сегодня ({today}, {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'][today.weekday()]}) выходной день (суббота/воскресенье) - мониторинг пропущен"
-                )
-                return
+        subscriptions = db_manager.get_active_subscriptions()
+        if not subscriptions:
+            logger.info("Нет активных подписок на проекты")
+            return []
 
-            # Проверяем, не является ли сегодня праздничным днем (по производственному календарю в БД)
-            if db_manager.is_holiday(today):
-                logger.info(f"Сегодня ({today}) праздничный день - мониторинг пропущен")
-                return
+        logger.info(f"Найдено {len(subscriptions)} активных подписок")
 
-            # Дополнительная проверка через API (на случай, если календарь не загружен)
-            if not calendar_client.is_working_day(today):
-                logger.info(f"Сегодня ({today}) нерабочий день (проверено через API) - мониторинг пропущен")
-                return
+        errors: list[str] = []
+        for project_key, project_name, channel_id, _team_id, _subscribed_by in subscriptions:
+            try:
+                logger.info(f"Мониторинг проекта {project_key}")
+                error = self.monitor_project(project_key, project_name, channel_id)
+            except Exception as e:
+                logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
+                error = f"неожиданная ошибка: {e}"
+            if error:
+                errors.append(f"{project_key} (канал {channel_id}): {error}")
 
-            # Получаем все активные подписки
-            subscriptions = db_manager.get_active_subscriptions()
+        return errors
 
-            if not subscriptions:
-                logger.info("Нет активных подписок на проекты")
-                return
+    def _find_subscription(self, project_key: str, channel_id: str):
+        for subscription in db_manager.get_subscriptions_by_channel(channel_id):
+            if subscription[0] == project_key:
+                return subscription
+        return None
 
-            logger.info(f"Найдено {len(subscriptions)} активных подписок")
-
-            for project_key, project_name, channel_id, _team_id, _subscribed_by in subscriptions:
-                try:
-                    logger.info(f"Мониторинг проекта {project_key}")
-                    self.monitor_project(project_key, project_name, channel_id)
-                except Exception as e:
-                    logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
-                    continue
-
-        except Exception as e:
-            logger.error(f"Ошибка мониторинга проектов: {e}")
-
-    def monitor_project(self, project_key: str, project_name: str, channel_id: str):
-        """Мониторинг конкретного проекта"""
+    def monitor_project(self, project_key: str, project_name: str, channel_id: str) -> str | None:
+        """Мониторинг конкретного проекта. Возвращает описание ошибки или None, если проверка прошла."""
         logger.info(f"Проверяем проект {project_key}")
 
-        try:
-            # Получаем подписку для определения пользователя, создавшего её
-            subscriptions = db_manager.get_subscriptions_by_channel(channel_id)
-            project_subscription = None
+        subscription = self._find_subscription(project_key, channel_id)
+        if not subscription:
+            logger.error(f"Подписка на проект {project_key} не найдена в канале {channel_id}")
+            return "подписка не найдена"
 
-            for subscription in subscriptions:
-                if subscription[0] == project_key:  # project_key
-                    project_subscription = subscription
-                    break
+        # subscription: (project_key, project_name, subscribed_by_email, created_at, active)
+        subscribed_by_email = subscription[2]
 
-            if not project_subscription:
-                logger.error(f"Подписка на проект {project_key} не найдена в канале {channel_id}")
-                return
+        issues = self.get_project_issues(subscribed_by_email, project_key)
+        if issues is None:
+            return (
+                f"не удалось получить задачи от имени {subscribed_by_email} "
+                f"(токен недействителен, нет доступа или Jira недоступна)"
+            )
 
-            # Извлекаем email пользователя, создавшего подписку
-            subscribed_by_email = project_subscription[2]  # subscribed_by_email
+        logger.info(f"Найдено {len(issues)} задач в проекте {project_key}")
 
-            # Получаем все задачи проекта через персональное подключение
-            issues = self.get_project_issues(subscribed_by_email, project_key)
-
-            if not issues:
-                logger.warning(f"Нет задач в проекте {project_key} или нет доступа")
-                return
-
-            logger.info(f"Найдено {len(issues)} задач в проекте {project_key}")
-
-            notifications_sent = 0
-
-            for issue in issues:
-                try:
-                    # Проверяем превышение трудозатрат
-                    if self.check_time_exceeded(issue):
-                        self.send_time_exceeded_notification(issue, project_key, channel_id)
-                        notifications_sent += 1
-
-                    # Проверяем просроченные сроки
-                    if self.check_deadline_overdue(issue):
-                        self.send_deadline_notification(issue, project_key, channel_id)
-                        notifications_sent += 1
-
-                    # Обновляем кеш задачи
-                    self.update_issue_in_cache(issue, project_key)
-
-                except Exception as e:
-                    logger.error(f"Ошибка проверки задачи {issue.key}: {e}")
-                    continue
-
-            logger.info(f"Проект {project_key}: отправлено {notifications_sent} уведомлений")
-
-        except Exception as e:
-            logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
+        problems = self.collect_problems(issues, update_cache_project=project_key)
+        sent = self.notify_problems(problems, project_key, channel_id)
+        logger.info(f"Проект {project_key}: найдено проблем {len(problems)}, отправлено уведомлений {sent}")
+        return None
 
     def monitor_project_for_channel(self, project_key: str, channel_id: str) -> str:
         """Мониторинг конкретного проекта для канала с возвратом результата"""
         logger.info(f"Ручная проверка проекта {project_key} для канала {channel_id}")
 
         try:
-            # Получаем подписку для определения пользователя, создавшего её
-            subscriptions = db_manager.get_subscriptions_by_channel(channel_id)
-            project_subscription = None
-
-            for subscription in subscriptions:
-                if subscription[0] == project_key:  # project_key в позиции 0
-                    project_subscription = subscription
-                    break
-
-            if not project_subscription:
+            subscription = self._find_subscription(project_key, channel_id)
+            if not subscription:
                 return "Подписка на проект не найдена в канале"
 
-            # Извлекаем данные подписки
-            # subscription: (project_key, project_name, subscribed_by_email, created_at, active)
-            subscribed_by_email = project_subscription[2]  # subscribed_by_email
+            subscribed_by_email = subscription[2]
 
             if not db_manager.get_user_jira_settings(subscribed_by_email):
                 return (
@@ -165,45 +126,18 @@ class ProjectMonitor:
                     f"либо переподпишите канал от своего имени: `subscribe {project_key}`"
                 )
 
-            # Получаем все задачи проекта через персональное подключение
             issues = self.get_project_issues(subscribed_by_email, project_key)
+            if issues is None:
+                return "не удалось получить задачи проекта (токен недействителен, нет доступа или Jira недоступна)"
 
-            if not issues:
-                return "Нет задач в проекте или нет доступа"
+            problems = self.collect_problems(issues)
+            if not problems:
+                return "проблем не найдено"
 
-            logger.info(f"Найдено {len(issues)} задач в проекте {project_key}")
-
-            problems_found = []
-
-            for issue in issues:
-                try:
-                    # Проверяем превышение трудозатрат
-                    if self.check_time_exceeded(issue):
-                        problems_found.append(f"⏱️ {issue.key}: превышение трудозатрат")
-
-                    # Проверяем просроченные сроки
-                    if self.check_deadline_overdue(issue):
-                        problems_found.append(f"📅 {issue.key}: просроченный срок")
-
-                except Exception as e:
-                    logger.error(f"Ошибка проверки задачи {issue.key}: {e}")
-                    problems_found.append(f"❌ {issue.key}: ошибка проверки")
-                    continue
-
-            if problems_found:
-                result = f"найдено проблем: {len(problems_found)}"
-                # Отправляем уведомления для найденных проблем
-                for issue in issues:
-                    try:
-                        if self.check_time_exceeded(issue):
-                            self.send_time_exceeded_notification(issue, project_key, channel_id)
-                        if self.check_deadline_overdue(issue):
-                            self.send_deadline_notification(issue, project_key, channel_id)
-                    except Exception as e:
-                        logger.error(f"Ошибка отправки уведомления для {issue.key}: {e}")
-            else:
-                result = "проблем не найдено"
-
+            sent = self.notify_problems(problems, project_key, channel_id)
+            result = f"найдено проблем: {len(problems)}"
+            if sent < len(problems):
+                result += f" (новых уведомлений: {sent}, остальные уже отправлялись сегодня)"
             logger.info(f"Проект {project_key}: {result}")
             return result
 
@@ -211,22 +145,35 @@ class ProjectMonitor:
             logger.error(f"Ошибка мониторинга проекта {project_key}: {e}")
             return f"ошибка проверки: {e!s}"
 
-    def get_project_issues(self, user_email: str, project_key: str) -> list:
-        """Получить все задачи проекта через персональное подключение"""
+    def get_project_issues(self, user_email: str, project_key: str) -> list | None:
+        """Получить задачи проекта через персональное подключение. None - ошибка получения."""
         try:
-            # Используем персональное подключение пользователя
             issues = user_jira_client.get_issues_for_monitoring(user_email, project_key)
-
             if issues is None:
                 logger.error(f"Не удалось получить задачи проекта {project_key} для пользователя {user_email}")
-                return []
+                return None
 
             logger.debug(f"Получено {len(issues)} задач для проекта {project_key}")
             return issues
 
         except Exception as e:
             logger.error(f"Ошибка получения задач проекта {project_key}: {e}")
-            return []
+            return None
+
+    def collect_problems(self, issues: list, update_cache_project: str | None = None) -> list[tuple]:
+        """Найти проблемные задачи: список (задача, тип проблемы)"""
+        problems: list[tuple] = []
+        for issue in issues:
+            try:
+                if self.check_time_exceeded(issue):
+                    problems.append((issue, TIME_EXCEEDED))
+                if self.check_deadline_overdue(issue):
+                    problems.append((issue, DEADLINE_OVERDUE))
+                if update_cache_project:
+                    self.update_issue_in_cache(issue, update_cache_project)
+            except Exception as e:
+                logger.error(f"Ошибка проверки задачи {issue.key}: {e}")
+        return problems
 
     def check_time_exceeded(self, issue) -> bool:
         """Проверить превышение трудозатрат"""
@@ -303,102 +250,71 @@ class ProjectMonitor:
             logger.error(f"Ошибка проверки даты закрытия для {issue.key}: {e}")
             return False
 
-    def send_time_exceeded_notification(self, issue, project_key: str, channel_id: str):
-        """Отправить уведомление о превышении трудозатрат"""
-        try:
-            # Получаем данные о времени
-            original_estimate = (getattr(issue.fields, "timeoriginalestimate", 0) or 0) / 3600.0
-            time_spent = (getattr(issue.fields, "timespent", 0) or 0) / 3600.0
+    def notify_problems(self, problems: list[tuple], project_key: str, channel_id: str) -> int:
+        """Отправить уведомления дайджестами: по несколько задач в одном посте канала и по одному ЛС на исполнителя.
 
-            # Получаем информацию об ответственном
-            assignee_email, assignee_name = self.get_assignee_info(issue)
+        Уведомления, уже отправленные в этот канал сегодня, пропускаются. Возвращает число новых уведомлений.
+        """
+        new_problems = [
+            (issue, kind) for issue, kind in problems if not db_manager.was_notified_today(issue.key, kind, channel_id)
+        ]
+        if not new_problems:
+            return 0
 
-            # Формируем сообщения
-            channel_message = self.format_time_exceeded_message(
-                issue.key,
-                issue.fields.summary,
-                assignee_name,
-                original_estimate,
-                time_spent,
-                True,  # для канала
-            )
+        for kind in (TIME_EXCEEDED, DEADLINE_OVERDUE):
+            items = [issue for issue, problem_kind in new_problems if problem_kind == kind]
+            for start in range(0, len(items), DIGEST_CHUNK_SIZE):
+                chunk = items[start : start + DIGEST_CHUNK_SIZE]
+                if not mattermost_client.send_channel_message(
+                    channel_id, self.format_channel_digest(project_key, kind, chunk)
+                ):
+                    logger.error(f"Не удалось отправить дайджест по проекту {project_key} в канал {channel_id}")
+                    # Не записываем в историю неотправленное: повторим при следующей проверке
+                    new_problems = [(i, k) for i, k in new_problems if k != kind or i not in chunk]
 
-            personal_message = self.format_time_exceeded_message(
-                issue.key,
-                issue.fields.summary,
-                assignee_name,
-                original_estimate,
-                time_spent,
-                False,  # для личного сообщения
-            )
-
-            # Отправляем уведомления в канал
-            mattermost_client.send_channel_message(channel_id, channel_message)
-
-            # Личные сообщения ответственному
+        # Личные сообщения: одно на исполнителя со всеми его задачами
+        by_assignee: dict[str, list[tuple]] = defaultdict(list)
+        for issue, kind in new_problems:
+            assignee_email, _ = self.get_assignee_info(issue)
             if assignee_email:
-                mattermost_client.send_direct_message_by_email(assignee_email, personal_message)
-
-            # Сохраняем в историю
-            db_manager.save_notification(
-                project_key,
-                issue.key,
-                "time_exceeded",
-                assignee_email,
-                assignee_name,
-                channel_id,
-                issue.fields.summary,
-                original_estimate,
-                time_spent,
+                by_assignee[assignee_email].append((issue, kind))
+        for assignee_email, assignee_problems in by_assignee.items():
+            mattermost_client.send_direct_message_by_email(
+                assignee_email, self.format_personal_digest(assignee_problems)
             )
 
-            logger.info(f"Отправлено уведомление о превышении времени: {issue.key}")
+        for issue, kind in new_problems:
+            self.save_problem_notification(issue, kind, project_key, channel_id)
 
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления о времени для {issue.key}: {e}")
+        return len(new_problems)
 
-    def send_deadline_notification(self, issue, project_key: str, channel_id: str):
-        """Отправить уведомление о просроченном сроке"""
-        try:
-            # Получаем информацию об ответственном
-            assignee_email, assignee_name = self.get_assignee_info(issue)
-
+    def save_problem_notification(self, issue, kind: str, project_key: str, channel_id: str):
+        """Сохранить отправленное уведомление в историю"""
+        assignee_email, assignee_name = self.get_assignee_info(issue)
+        if kind == TIME_EXCEEDED:
+            planned, actual = self._hours(issue)
+            due_date = None
+        else:
+            planned, actual = 0, 0
             due_date = getattr(issue.fields, "duedate", None)
+        db_manager.save_notification(
+            project_key,
+            issue.key,
+            kind,
+            assignee_email,
+            assignee_name,
+            channel_id,
+            issue.fields.summary,
+            planned,
+            actual,
+            due_date,
+        )
 
-            # Формируем сообщения
-            channel_message = self.format_deadline_message(
-                issue.key, issue.fields.summary, assignee_name, due_date, True
-            )
-
-            personal_message = self.format_deadline_message(
-                issue.key, issue.fields.summary, assignee_name, due_date, False
-            )
-
-            # Отправляем уведомления в канал
-            mattermost_client.send_channel_message(channel_id, channel_message)
-
-            # Личные сообщения ответственному
-            if assignee_email:
-                mattermost_client.send_direct_message_by_email(assignee_email, personal_message)
-
-            # Сохраняем в историю
-            db_manager.save_notification(
-                project_key,
-                issue.key,
-                "deadline_overdue",
-                assignee_email,
-                assignee_name,
-                channel_id,
-                issue.fields.summary,
-                0,
-                0,
-                due_date,
-            )
-
-            logger.info(f"Отправлено уведомление о просрочке: {issue.key}")
-
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления о сроке для {issue.key}: {e}")
+    @staticmethod
+    def _hours(issue) -> tuple[float, float]:
+        planned = (getattr(issue.fields, "timeoriginalestimate", 0) or 0) / 3600.0
+        actual = (getattr(issue.fields, "timespent", 0) or 0) / 3600.0
+        return planned, actual
 
     def get_assignee_info(self, issue) -> tuple[str | None, str]:
         """Получить информацию об ответственном за задачу"""
@@ -440,66 +356,59 @@ class ProjectMonitor:
         except Exception as e:
             logger.error(f"Ошибка обновления кеша для {issue.key}: {e}")
 
-    def format_time_exceeded_message(
-        self, issue_key: str, summary: str, assignee: str, planned_hours: float, actual_hours: float, for_channel: bool
-    ) -> str:
-        """Форматировать сообщение о превышении времени"""
-        excess_hours = actual_hours - planned_hours
+    def _issue_link(self, issue_key: str) -> str:
+        return f"[{issue_key}]({config.JIRA_URL}/browse/{issue_key})"
 
-        # Создаем ссылку на задачу в Jira
-        jira_url = f"{config.JIRA_URL}/browse/{issue_key}"
-        task_link = f"[{issue_key}]({jira_url})"
+    @staticmethod
+    def _short(summary: str) -> str:
+        summary = summary or ""
+        return summary[:SUMMARY_MAX_LENGTH] + ("..." if len(summary) > SUMMARY_MAX_LENGTH else "")
 
-        if for_channel:
-            return f"""🚨 **Превышение трудозатрат**
-
-📋 **Задача:** {task_link} - {summary[:50]}{"..." if len(summary) > 50 else ""}
-👤 **Ответственный:** {assignee}
-⏱️ **Плановые часы:** {planned_hours:.1f}ч
-📈 **Фактические часы:** {actual_hours:.1f}ч
-❗ **Превышение:** {excess_hours:.1f}ч
-
-Требует внимания руководителя проекта!"""
-        else:
-            return f"""🚨 **Превышение трудозатрат по вашей задаче**
-
-📋 **Задача:** {task_link} - {summary}
-⏱️ **Плановые часы:** {planned_hours:.1f}ч
-📈 **Фактические часы:** {actual_hours:.1f}ч
-❗ **Превышение:** {excess_hours:.1f}ч
-
-Пожалуйста, свяжитесь с руководителем проекта для обсуждения ситуации."""
-
-    def format_deadline_message(
-        self, issue_key: str, summary: str, assignee: str, due_date: str, for_channel: bool
-    ) -> str:
-        """Форматировать сообщение о просроченном сроке"""
+    @staticmethod
+    def _format_due_date(due_date: str | None) -> str:
         try:
-            due_datetime = datetime.strptime(due_date, "%Y-%m-%d")
-            formatted_date = due_datetime.strftime("%d.%m.%Y")
+            return datetime.strptime(due_date, "%Y-%m-%d").strftime("%d.%m.%Y")
         except Exception:
-            formatted_date = due_date
+            return str(due_date)
 
-        # Создаем ссылку на задачу в Jira
-        jira_url = f"{config.JIRA_URL}/browse/{issue_key}"
-        task_link = f"[{issue_key}]({jira_url})"
-
-        if for_channel:
-            return f"""⏰ **Просрочен срок выполнения**
-
-📋 **Задача:** {task_link} - {summary[:50]}{"..." if len(summary) > 50 else ""}
-👤 **Ответственный:** {assignee}
-📅 **Срок выполнения:** {formatted_date}
-❗ **Статус:** Просрочено
-
-Задача требует немедленного внимания!"""
+    def _problem_line(self, issue, kind: str, with_assignee: bool) -> str:
+        line = f"• {self._issue_link(issue.key)} - {self._short(issue.fields.summary)}"
+        details = []
+        if with_assignee:
+            details.append(f"👤 {self.get_assignee_info(issue)[1]}")
+        if kind == TIME_EXCEEDED:
+            planned, actual = self._hours(issue)
+            details.append(f"план {planned:.1f}ч, факт {actual:.1f}ч, превышение {actual - planned:.1f}ч")
         else:
-            return f"""⏰ **Просрочен срок по вашей задаче**
+            details.append(f"срок {self._format_due_date(getattr(issue.fields, 'duedate', None))}")
+        return f"{line}\n  {'; '.join(details)}"
 
-📋 **Задача:** {task_link} - {summary}
-📅 **Срок выполнения был:** {formatted_date}
+    def format_channel_digest(self, project_key: str, kind: str, issues: list) -> str:
+        """Сообщение в канал: несколько задач одного типа проблемы"""
+        if kind == TIME_EXCEEDED:
+            title = f"🚨 **Превышение трудозатрат - {project_key} ({len(issues)})**"
+            footer = "Требует внимания руководителя проекта!"
+        else:
+            title = f"⏰ **Просрочен срок выполнения - {project_key} ({len(issues)})**"
+            footer = "Задачи требуют немедленного внимания!"
+        lines = [self._problem_line(issue, kind, with_assignee=True) for issue in issues]
+        return f"{title}\n\n" + "\n".join(lines) + f"\n\n{footer}"
 
-Пожалуйста, обновите статус задачи или свяжитесь с руководителем проекта."""
+    def format_personal_digest(self, problems: list[tuple]) -> str:
+        """Личное сообщение исполнителю со всеми его проблемными задачами"""
+        lines = []
+        exceeded = [issue for issue, kind in problems if kind == TIME_EXCEEDED]
+        overdue = [issue for issue, kind in problems if kind == DEADLINE_OVERDUE]
+        if exceeded:
+            lines.append("🚨 **Превышение трудозатрат по вашим задачам:**")
+            lines.extend(self._problem_line(issue, TIME_EXCEEDED, with_assignee=False) for issue in exceeded)
+            lines.append("")
+        if overdue:
+            lines.append("⏰ **Просрочен срок по вашим задачам:**")
+            lines.extend(self._problem_line(issue, DEADLINE_OVERDUE, with_assignee=False) for issue in overdue)
+            lines.append("")
+        lines.append("Пожалуйста, обновите статус задач или свяжитесь с руководителем проекта.")
+        return "\n".join(lines)
 
 
 # Глобальный экземпляр монитора

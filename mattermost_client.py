@@ -3,9 +3,10 @@
 """
 
 import asyncio
-import contextlib
 import json
 import logging
+import mimetypes
+import os
 import re
 import ssl
 import time
@@ -16,6 +17,7 @@ import websockets
 from mattermostdriver import Driver
 
 from auth_messages import mask_secrets, pat_instructions
+from command_aliases import resolve_command
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ def _parse_mattermost_url(url: str):
     """Разобрать MATTERMOST_URL; адрес без схемы (chat.example.com) считается http, как и раньше"""
     url = url.strip()
     if "://" not in url:
+        logger.warning("В MATTERMOST_URL не указана схема - используется http (токен передается без шифрования)")
         url = f"http://{url}"
     return urlparse(url)
 
@@ -36,7 +39,8 @@ class MattermostClient:
         self.bot_username = None
         self._running = False
         self._websocket = None
-        self._close_task = None
+        self._channel_types: dict[str, str] = {}  # тип канала не меняется - кешируем
+        self._background_tasks: set[asyncio.Task] = set()
         self._connect()
 
     def _connect(self):
@@ -123,9 +127,7 @@ class MattermostClient:
     def upload_image(self, channel_id: str, file_path: str, message: str = "", root_id: str | None = None) -> bool:
         """Загрузить изображение в канал и опубликовать пост с файлом"""
         try:
-            import os
-
-            filename = file_path.split("/")[-1]
+            filename = os.path.basename(file_path)
             if not os.path.exists(file_path):
                 logger.error(f"Файл для загрузки не найден: {file_path}")
                 return False
@@ -140,7 +142,8 @@ class MattermostClient:
                 logger.warning(f"upload_file(variant1) ошибка: {e1}")
                 try:
                     upload_result = self.driver.files.upload_file(
-                        channel_id=channel_id, files={"files": (filename, data, "image/jpeg")}
+                        channel_id=channel_id,
+                        files={"files": (filename, data, mimetypes.guess_type(filename)[0] or "image/jpeg")},
                     )
                 except Exception as e2:
                     logger.error(f"upload_file(variant2) ошибка: {e2}")
@@ -193,9 +196,11 @@ class MattermostClient:
                 asyncio.run(self._connect_websocket())
             except Exception as e:
                 logger.error(f"❌ Ошибка WebSocket соединения: {e}")
-                if self._running:
-                    logger.info("🔄 Переподключение через 5 секунд...")
-                    time.sleep(5)
+
+            # Пауза перед переподключением в любом случае (в том числе при штатном закрытии соединения сервером)
+            if self._running:
+                logger.info("🔄 Переподключение через 5 секунд...")
+                time.sleep(5)
 
     async def _connect_websocket(self):
         """Подключение к WebSocket"""
@@ -240,7 +245,10 @@ class MattermostClient:
                         message_str = message.decode()
                     else:
                         message_str = str(message)
-                    await self._handle_websocket_message(message_str)
+                    # Каждое сообщение обрабатывается отдельной задачей: долгая команда не блокирует остальных
+                    task = asyncio.create_task(self._handle_websocket_message(message_str))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
 
         except websockets.exceptions.ConnectionClosed:
             logger.warning("⚠️ WebSocket соединение закрыто")
@@ -321,8 +329,13 @@ class MattermostClient:
             user_id = post.get("user_id")
             root_id = post.get("root_id") or post_id  # ID треда или самого поста
 
+            # Тип канала приходит в самом событии; при его отсутствии запрашиваем у сервера
+            channel_type = event.get("data", {}).get("channel_type")
+            if channel_type:
+                self._channel_types[channel_id] = channel_type
+
             # Проверяем, является ли это личным сообщением
-            if self._is_direct_message(channel_id):
+            if await asyncio.to_thread(self._is_direct_message, channel_id):
                 await self._handle_direct_message(channel_id, message, user_id)
                 return
 
@@ -337,167 +350,49 @@ class MattermostClient:
 
     def _is_direct_message(self, channel_id: str) -> bool:
         """Проверяет, является ли канал личным сообщением"""
-        try:
-            # Получаем информацию о канале
-            channel_info = self.driver.channels.get_channel(channel_id)
-            return channel_info.get("type") == "D"  # D = Direct message
-        except Exception:
-            return False
+        channel_type = self._channel_types.get(channel_id)
+        if channel_type is None:
+            try:
+                channel_type = self.driver.channels.get_channel(channel_id).get("type")
+            except Exception as e:
+                logger.warning(f"Не удалось определить тип канала {channel_id}: {e}")
+                return False
+            if channel_type:
+                self._channel_types[channel_id] = channel_type
+        return channel_type == "D"  # D = Direct message
+
+    def _bot_mention_regex(self) -> re.Pattern | None:
+        """Регулярное выражение упоминания бота (@имя целиком, а не часть другого имени)"""
+        names = [self.bot_username, "jora", "Жора", "project-monitor-bot", "project_monitor_bot"]
+        escaped = [re.escape(name) for name in names if name]
+        if not escaped:
+            return None
+        return re.compile(r"@(?:" + "|".join(escaped) + r")(?![\w-])", re.IGNORECASE)
 
     def _is_bot_mentioned(self, message: str) -> bool:
         """Проверяет, упоминается ли бот в сообщении"""
-        if not self.bot_username:
+        pattern = self._bot_mention_regex()
+        if not pattern or not self.bot_username:
             return False
-
-        # Проверяем упоминания через @username
-        mention_patterns = [
-            f"@{self.bot_username}",
-            "@jora",  # Имя из конфигурации
-            "@Жора",  # Отображаемое имя в канале
-            "@project-monitor-bot",  # Полное имя
-            "@project_monitor_bot",  # Альтернативное имя
-            "@ask",  # Тестовый бот
-        ]
-
-        message_lower = message.lower()
-        # Проверяем точные упоминания и частичные совпадения
-        for pattern in mention_patterns:
-            if pattern.lower() in message_lower:
-                logger.info(f"🔍 Найдено упоминание бота: '{pattern}' в сообщении: '{mask_secrets(message)}'")
-                return True
-
-        # Дополнительная проверка: ищем любые упоминания @username
-        mentions = re.findall(r"@(\w+)", message)
-        for mention in mentions:
-            if mention.lower() in ["jora", "жора", "ask", self.bot_username.lower()]:
-                logger.info(f"🔍 Найдено упоминание через regex: '@{mention}' в сообщении: '{mask_secrets(message)}'")
-                return True
-
+        if pattern.search(message):
+            logger.info(f"🔍 Найдено упоминание бота в сообщении: '{mask_secrets(message)}'")
+            return True
         return False
 
     def _is_command(self, message: str) -> bool:
         """Проверяет, является ли сообщение командой"""
-        message_lower = message.lower().strip()
-
-        # Расширенный список команд с алиасами
-        command_aliases = {
-            "help": ["help", "справка", "помощь", "хелп", "команды", "что умеешь"],
-            "subscribe": [
-                "subscribe",
-                "подписка",
-                "подпиши",
-                "подпиши на проект",
-                "проект",
-                "мониторить",
-                "отслеживать",
-            ],
-            "unsubscribe": ["unsubscribe", "отписка", "отпиши", "отпиши от проекта", "не мониторить", "не отслеживать"],
-            "list_subscriptions": [
-                "list_subscriptions",
-                "подписки",
-                "список подписок",
-                "мои подписки",
-                "что отслеживаешь",
-            ],
-            "run_subscriptions": ["run_subscriptions", "проверь", "проверь подписки", "запусти проверку", "мониторинг"],
-            "list_projects": [
-                "list_projects",
-                "проекты",
-                "список проектов",
-                "все проекты",
-                "доступные проекты",
-                "показать проекты",
-                "какие проекты",
-            ],
-            "setup_jira": [
-                "setup_jira",
-                "login",
-                "войти",
-                "вход",
-                "токен",
-                "token",
-                "настрой jira",
-                "настрой подключение",
-                "jira настройка",
-                "настрой джира",
-                "настрой джиру",
-            ],
-            "test_jira": ["test_jira", "проверь jira", "тест jira", "проверь подключение"],
-            "change_password": ["change_password", "смени пароль", "измени пароль", "новый пароль"],
-            "logout": ["logout", "выйти", "выход"],
-            "history": ["history", "история", "история уведомлений", "что было"],
-            "status": ["status", "статус", "как дела", "что происходит"],
-            "analytics": ["analytics", "аналитика", "аналитика проекта", "покажи аналитику", "график", "chart"],
-        }
-
-        # Проверяем все алиасы команд
-        return any(any(alias in message_lower for alias in aliases) for _command, aliases in command_aliases.items())
+        return self._get_main_command(message) != "unknown"
 
     def _get_main_command(self, message: str) -> str:
-        """Получить основную команду из алиаса"""
-        message_lower = message.lower().strip()
-
-        command_aliases = {
-            "help": ["help", "справка", "помощь", "хелп", "команды", "что умеешь"],
-            "subscribe": [
-                "subscribe",
-                "подписка",
-                "подпиши",
-                "подпиши на проект",
-                "проект",
-                "мониторить",
-                "отслеживать",
-            ],
-            "unsubscribe": ["unsubscribe", "отписка", "отпиши", "отпиши от проекта", "не мониторить", "не отслеживать"],
-            "list_subscriptions": [
-                "list_subscriptions",
-                "подписки",
-                "список подписок",
-                "мои подписки",
-                "что отслеживаешь",
-            ],
-            "run_subscriptions": ["run_subscriptions", "проверь", "проверь подписки", "запусти проверку", "мониторинг"],
-            "list_projects": [
-                "list_projects",
-                "проекты",
-                "список проектов",
-                "все проекты",
-                "доступные проекты",
-                "показать проекты",
-                "какие проекты",
-            ],
-            "setup_jira": [
-                "setup_jira",
-                "login",
-                "войти",
-                "вход",
-                "токен",
-                "token",
-                "настрой jira",
-                "настрой подключение",
-                "jira настройка",
-                "настрой джира",
-                "настрой джиру",
-            ],
-            "test_jira": ["test_jira", "проверь jira", "тест jira", "проверь подключение"],
-            "change_password": ["change_password", "смени пароль", "измени пароль", "новый пароль"],
-            "logout": ["logout", "выйти", "выход"],
-            "history": ["history", "история", "история уведомлений", "что было"],
-            "status": ["status", "статус", "как дела", "что происходит"],
-            "analytics": ["analytics", "аналитика", "аналитика проекта", "покажи аналитику", "график", "chart"],
-        }
-
-        for command, aliases in command_aliases.items():
-            if any(alias in message_lower for alias in aliases):
-                return command
-
-        return "unknown"
+        """Получить основную команду из алиаса в начале сообщения"""
+        command, _args = resolve_command(message.split())
+        return command or "unknown"
 
     async def _handle_direct_message(self, channel_id: str, message: str, user_id: str):
         """Обработка личных сообщений"""
         try:
             # Получаем информацию о пользователе
-            user = self.driver.users.get_user(user_id)
+            user = await asyncio.to_thread(self.driver.users.get_user, user_id)
             username = user.get("username", "Неизвестный")
 
             logger.info(f"📨 Получено личное сообщение от {username}: {mask_secrets(message)}")
@@ -518,7 +413,7 @@ class MattermostClient:
         """Обработка команд с упоминанием бота"""
         try:
             # Получаем информацию о пользователе
-            user = self.driver.users.get_user(user_id)
+            user = await asyncio.to_thread(self.driver.users.get_user, user_id)
             username = user.get("username", "Неизвестный")
 
             # Удаляем упоминание бота из сообщения
@@ -530,32 +425,12 @@ class MattermostClient:
         except Exception as e:
             logger.error(f"❌ Ошибка обработки команды с упоминанием бота: {e}")
 
-    async def _handle_channel_command(self, channel_id: str, message: str, user_id: str, root_id: str, post_id: str):
-        """Обработка команд в канале"""
-        try:
-            # Получаем информацию о пользователе
-            user = self.driver.users.get_user(user_id)
-            username = user.get("username", "Неизвестный")
-
-            # Обрабатываем команду
-            await self._handle_command(channel_id, message, user_id, username, root_id)
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки команды в канале: {e}")
-
     def _remove_bot_mention(self, message: str) -> str:
         """Убирает упоминание бота из сообщения"""
-        if not self.bot_username:
+        pattern = self._bot_mention_regex()
+        if not pattern:
             return message
-
-        # Паттерны для удаления упоминаний
-        mention_patterns = [f"@{self.bot_username}", "@jora", "@Жора", "@project-monitor-bot", "@project_monitor_bot"]
-
-        cleaned = message
-        for pattern in mention_patterns:
-            cleaned = cleaned.replace(pattern, "")
-
-        return cleaned.strip()
+        return pattern.sub("", message).strip()
 
     async def _handle_command(
         self, channel_id: str, message: str, user_id: str, username: str, root_id: str | None = None
@@ -565,11 +440,11 @@ class MattermostClient:
             from bot_commands import command_handler
 
             # Получаем email пользователя
-            user = self.driver.users.get_user(user_id)
+            user = await asyncio.to_thread(self.driver.users.get_user, user_id)
             user_email = user.get("email", username)  # Используем email или username как fallback
 
             # Определяем тип канала
-            channel_type = "D" if self._is_direct_message(channel_id) else "O"
+            channel_type = "D" if await asyncio.to_thread(self._is_direct_message, channel_id) else "O"
 
             # Получаем основную команду из алиаса
             main_command = self._get_main_command(message)
@@ -595,10 +470,15 @@ class MattermostClient:
                 # Отправляем ответ
                 if root_id:
                     # Ответ в тред
-                    self.driver.posts.create_post({"channel_id": channel_id, "message": response, "root_id": root_id})
+                    await asyncio.to_thread(
+                        self.driver.posts.create_post,
+                        {"channel_id": channel_id, "message": response, "root_id": root_id},
+                    )
                 else:
                     # Обычное сообщение
-                    self.driver.posts.create_post({"channel_id": channel_id, "message": response})
+                    await asyncio.to_thread(
+                        self.driver.posts.create_post, {"channel_id": channel_id, "message": response}
+                    )
 
                 logger.info(f"✅ Ответ отправлен пользователю {username}")
 
@@ -608,7 +488,7 @@ class MattermostClient:
     async def _send_help_message(self, channel_id: str):
         """Отправка справочного сообщения: различаем ЛС и каналы"""
         try:
-            is_dm = self._is_direct_message(channel_id)
+            is_dm = await asyncio.to_thread(self._is_direct_message, channel_id)
             if is_dm:
                 help_message = f"""
 🤖 **Привет! Я Project Monitor Bot**
@@ -664,7 +544,7 @@ class MattermostClient:
 **Безопасность:** вход в Jira по Personal Access Token, токены хранятся в зашифрованном виде
 """
 
-            self.driver.posts.create_post({"channel_id": channel_id, "message": help_message})
+            await asyncio.to_thread(self.driver.posts.create_post, {"channel_id": channel_id, "message": help_message})
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки справки: {e}")
@@ -677,7 +557,7 @@ class MattermostClient:
             suggestions = []
 
             # Подсказки на основе ключевых слов (адаптация под DM/канал)
-            is_dm = self._is_direct_message(channel_id)
+            is_dm = await asyncio.to_thread(self._is_direct_message, channel_id)
             prefix = "" if is_dm else f"@{self.bot_username} "
             if any(word in message_lower for word in ["график", "аналит", "chart", "диаграм", "статистик"]):
                 suggestions.append(f"💡 Попробуйте: `{prefix}графики IDB` или `{prefix}analytics IDB`")
@@ -721,24 +601,19 @@ class MattermostClient:
 **Для полной справки:** `{prefix}help`
 """
 
-            self.driver.posts.create_post({"channel_id": channel_id, "message": help_message})
+            await asyncio.to_thread(self.driver.posts.create_post, {"channel_id": channel_id, "message": help_message})
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки справки с подсказками: {e}")
 
     def stop(self):
-        """Остановка клиента"""
+        """Остановка клиента: цикл прослушивания завершится после закрытия WebSocket"""
         logger.info("🛑 Остановка Mattermost клиента...")
         self._running = False
-
-        if self._websocket:
-            with contextlib.suppress(Exception):
-                self._close_task = asyncio.create_task(self._websocket.close())
-
         logger.info("✅ Mattermost клиент остановлен")
 
 
-# Глобальный экземпляр клиента (ленивая инициализация)
+# Глобальный экземпляр клиента (создается при импорте модуля, подключение к Mattermost происходит сразу)
 _mattermost_client = None
 
 

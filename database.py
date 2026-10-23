@@ -19,11 +19,29 @@ class DatabaseManager:
         self.db_path = db_path or config.DATABASE_PATH
         self.init_database()
 
+    @contextlib.contextmanager
+    def _connect(self):
+        """Соединение с БД: коммит при успехе, откат при ошибке, гарантированное закрытие"""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _normalize_email(user_email: str) -> str:
+        return (user_email or "").strip().lower()
+
     def init_database(self):
         """Инициализация базы данных и создание таблиц"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
 
                 # Таблица настроек подключения к Jira для пользователей
                 cursor.execute("""
@@ -110,9 +128,29 @@ class DatabaseManager:
                         sent_to_channel BOOLEAN DEFAULT 0,
                         sent_to_assignee BOOLEAN DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(issue_key, notification_type, notification_date)
+                        UNIQUE(issue_key, notification_type, channel_id, notification_date)
                     )
                 """)
+
+                # Миграция: уникальность уведомления теперь учитывает канал
+                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='notification_history'")
+                table_sql = (cursor.fetchone() or [""])[0] or ""
+                if "UNIQUE(issue_key, notification_type, notification_date)" in table_sql:
+                    cursor.execute("ALTER TABLE notification_history RENAME TO notification_history_old")
+                    cursor.execute("DROP INDEX IF EXISTS idx_notification_date")
+                    cursor.execute(
+                        table_sql.replace(
+                            "UNIQUE(issue_key, notification_type, notification_date)",
+                            "UNIQUE(issue_key, notification_type, channel_id, notification_date)",
+                        )
+                    )
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO notification_history
+                        SELECT * FROM notification_history_old
+                    """
+                    )
+                    cursor.execute("DROP TABLE notification_history_old")
 
                 # Таблица для кеширования информации о задачах
                 cursor.execute("""
@@ -218,7 +256,7 @@ class DatabaseManager:
             # Шифруем токен перед сохранением (хранится в колонке jira_password)
             encrypted_token = password_crypto.encrypt_password(jira_token)
 
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 # Проверяем, существует ли уже запись для этого пользователя
                 cursor.execute("SELECT id FROM user_jira_settings WHERE user_email = ?", (user_email,))
@@ -264,8 +302,9 @@ class DatabaseManager:
         Возвращает только записи с авторизацией по PAT: устаревшие записи с логином/паролем
         считаются отключенными.
         """
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Сначала пробуем найти по email
@@ -309,8 +348,9 @@ class DatabaseManager:
 
     def update_jira_test_result(self, user_email: str, success: bool) -> bool:
         """Обновить результат тестирования подключения к Jira"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 if success:
                     # При успешном подключении сбрасываем счетчик попыток и разблокируем
@@ -341,8 +381,9 @@ class DatabaseManager:
 
     def increment_connection_attempts(self, user_email: str, error_message: str | None = None) -> tuple[int, bool]:
         """Увеличить счетчик попыток подключения и проверить, нужно ли заблокировать"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 # Получаем текущее количество попыток
                 cursor.execute(
@@ -401,8 +442,9 @@ class DatabaseManager:
 
     def reset_connection_attempts(self, user_email: str) -> bool:
         """Сбросить счетчик попыток подключения (при смене пароля)"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -421,8 +463,9 @@ class DatabaseManager:
 
     def is_user_blocked(self, user_email: str) -> bool:
         """Проверить, заблокирован ли пользователь"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -438,8 +481,9 @@ class DatabaseManager:
 
     def get_user_block_info(self, user_email: str) -> tuple[int, bool, str | None] | None:
         """Получить информацию о блокировке пользователя: (попытки, заблокирован, дата блокировки)"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -463,7 +507,7 @@ class DatabaseManager:
         'pat_reset' - токен сброшен из-за смены ключа шифрования.
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -481,8 +525,9 @@ class DatabaseManager:
 
         notified=True отмечает, что уведомление о повторном входе доставлено (повторно не отправляется).
         """
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -503,7 +548,7 @@ class DatabaseManager:
     def get_app_setting(self, key: str) -> str | None:
         """Получить служебную настройку приложения"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
                 result = cursor.fetchone()
@@ -519,7 +564,7 @@ class DatabaseManager:
         им будет отправлена просьба войти заново. Возвращает количество сброшенных токенов.
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT value FROM app_settings WHERE key = 'encryption_key_fingerprint'")
                 row = cursor.fetchone()
@@ -553,7 +598,7 @@ class DatabaseManager:
     def get_all_jira_users(self) -> list[tuple[str, str, str]]:
         """Все пользователи с настройками Jira: (user_email, jira_username, auth_type)"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT user_email, jira_username, COALESCE(auth_type, 'password') FROM user_jira_settings"
@@ -565,8 +610,9 @@ class DatabaseManager:
 
     def delete_user_jira_settings(self, user_email: str) -> bool:
         """Удалить настройки Jira пользователя"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM user_jira_settings WHERE user_email = ?", (user_email,))
                 conn.commit()
@@ -582,8 +628,9 @@ class DatabaseManager:
         self, project_key: str, project_name: str, channel_id: str, team_id: str, user_id: str, user_email: str
     ) -> bool:
         """Подписать канал на мониторинг проекта"""
+        user_email = self._normalize_email(user_email)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -604,7 +651,7 @@ class DatabaseManager:
     def unsubscribe_from_project(self, project_key: str, channel_id: str) -> bool:
         """Отписать канал от мониторинга проекта"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -628,7 +675,7 @@ class DatabaseManager:
     def get_active_subscriptions(self) -> list[tuple]:
         """Получить список активных подписок на проекты"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT project_key, project_name, mattermost_channel_id,
@@ -645,7 +692,7 @@ class DatabaseManager:
     def get_subscriptions_by_channel(self, channel_id: str) -> list[tuple]:
         """Получить подписки для конкретного канала"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -664,7 +711,7 @@ class DatabaseManager:
     def get_all_subscriptions(self) -> list[tuple]:
         """Получить все подписки (для администраторов)"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT project_key, project_name, mattermost_channel_id,
@@ -680,7 +727,7 @@ class DatabaseManager:
     def delete_subscription_by_id(self, project_key: str, channel_id: str) -> bool:
         """Удалить конкретную подписку (для администраторов)"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -713,7 +760,7 @@ class DatabaseManager:
     ) -> bool:
         """Сохранить информацию об отправленном уведомлении"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -743,6 +790,23 @@ class DatabaseManager:
             logger.error(f"Ошибка сохранения уведомления для {issue_key}: {e}")
             return False
 
+    def was_notified_today(self, issue_key: str, notification_type: str, channel_id: str) -> bool:
+        """Было ли уже отправлено такое уведомление в этот канал сегодня"""
+        try:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT 1 FROM notification_history
+                    WHERE issue_key = ? AND notification_type = ? AND channel_id = ? AND notification_date = ?
+                """,
+                    (issue_key, notification_type, channel_id, date.today().isoformat()),
+                )
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Ошибка проверки истории уведомлений для {issue_key}: {e}")
+            return False
+
     def update_issue_cache(
         self,
         issue_key: str,
@@ -758,7 +822,7 @@ class DatabaseManager:
     ) -> bool:
         """Обновить кеш информации о задаче"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -804,7 +868,7 @@ class DatabaseManager:
         query += " ORDER BY notification_date DESC, project_key, issue_key"
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 return cursor.fetchall()
@@ -815,7 +879,7 @@ class DatabaseManager:
     def get_last_notification_date(self) -> str | None:
         """Дата последнего отправленного уведомления"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT MAX(notification_date) FROM notification_history")
                 result = cursor.fetchone()
@@ -829,7 +893,7 @@ class DatabaseManager:
     ) -> bool:
         """Сохранить выходные и праздничные дни календаря на год"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Удаляем старые данные для этого года
@@ -871,7 +935,7 @@ class DatabaseManager:
     def is_holiday(self, check_date: date) -> bool:
         """Проверить, является ли день выходным или праздничным"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -889,7 +953,7 @@ class DatabaseManager:
     def is_calendar_loaded(self, year: int) -> bool:
         """Проверить, загружен ли календарь на год"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -906,7 +970,7 @@ class DatabaseManager:
     def update_calendar_check_date(self, year: int) -> bool:
         """Обновить дату последней проверки календаря"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -927,7 +991,7 @@ class DatabaseManager:
     def get_calendar_check_date(self, year: int) -> str | None:
         """Получить дату последней проверки календаря"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
