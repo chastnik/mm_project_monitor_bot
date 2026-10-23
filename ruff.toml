@@ -35,4 +35,6 @@ known-first-party = [
     "calendar_client",
     "crypto_utils",
     "auth_messages",
+    "command_aliases",
+    "jira_constants",
 ]

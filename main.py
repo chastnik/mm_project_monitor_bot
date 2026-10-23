@@ -8,7 +8,6 @@ import contextlib
 import logging
 import signal
 import sys
-import time
 from datetime import datetime
 
 from auth_messages import legacy_user_disabled_message, token_reset_message
@@ -41,7 +40,6 @@ class StandupBot:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.running = False
-        self.websocket = None
 
     def start(self):
         """Запуск бота"""
@@ -66,9 +64,6 @@ class StandupBot:
             # Запускаем планировщик
             scheduler.start()
             self.logger.info("✅ Планировщик запущен")
-
-            # Настраиваем WebSocket для получения сообщений
-            self._setup_websocket()
 
             # Отключаем пользователей со входом по логину/паролю и просим войти по PAT
             self._notify_legacy_users()
@@ -98,10 +93,9 @@ class StandupBot:
         # Останавливаем планировщик
         scheduler.stop()
 
-        # Закрываем WebSocket
-        if self.websocket:
-            with contextlib.suppress(Exception):
-                mattermost_client.driver.disconnect()
+        # Останавливаем прослушивание WebSocket
+        with contextlib.suppress(Exception):
+            mattermost_client.stop()
 
         self.logger.info("✅ Бот остановлен")
 
@@ -161,18 +155,6 @@ class StandupBot:
 
         self.logger.info(f"✅ Канал найден: {channel_info['display_name']}")
 
-    def _setup_websocket(self):
-        """Настройка WebSocket для получения сообщений"""
-        try:
-            # Включаем WebSocket для получения сообщений в реальном времени
-            self.websocket = True
-            self.logger.info("✅ WebSocket включен для получения сообщений")
-            self.logger.info("💡 Бот будет отвечать на личные сообщения и команды в каналах")
-            self.logger.info("📅 Автоматические проверки выполняются по расписанию")
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка настройки WebSocket: {e}")
-            self.websocket = False
-
     def _notify_legacy_users(self):
         """Отключить пользователей без действующего PAT (старый вход по паролю или сброшенный токен)
         и отправить им инструкцию по входу через PAT"""
@@ -226,8 +208,7 @@ class StandupBot:
     def _send_mode_info(self):
         """Отправить информацию о режиме работы бота"""
         try:
-            if self.websocket:
-                mode_message = f"""🤖 **Project Monitor Bot запущен**
+            mode_message = f"""🤖 **Project Monitor Bot запущен**
 
 **Режим работы:**
 • ✅ WebSocket активен - бот отвечает на сообщения в реальном времени
@@ -245,20 +226,6 @@ class StandupBot:
 **⚠️ Важно:** Для работы команд в каналах бот должен быть добавлен в канал!
 
 🔒 **Безопасность:** вход в Jira по Personal Access Token, токены хранятся в зашифрованном виде"""
-            else:
-                mode_message = f"""🤖 **Project Monitor Bot запущен**
-
-**Режим работы:**
-• ⚠️ WebSocket отключен - бот работает только в режиме планировщика
-• 📅 Автоматические проверки по расписанию в {config.CHECK_TIME}
-• 💬 Личные сообщения и команды недоступны
-
-**Основные функции:**
-• Автоматический мониторинг проектов
-• Уведомления о превышении трудозатрат
-• Уведомления о просроченных сроках
-
-🔒 **Безопасность:** вход в Jira по Personal Access Token, токены хранятся в зашифрованном виде"""
 
             mattermost_client.send_channel_message(config.MATTERMOST_CHANNEL_ID, mode_message)
 
@@ -268,15 +235,8 @@ class StandupBot:
     def _run_main_loop(self):
         """Основной цикл работы бота"""
         try:
-            if self.websocket:
-                # Если WebSocket включен, запускаем прослушивание сообщений
-                self.logger.info("🎧 Запуск прослушивания WebSocket сообщений...")
-                mattermost_client.start_listening()
-            else:
-                # Если WebSocket отключен, работаем только в режиме планировщика
-                self.logger.info("📅 Работа в режиме планировщика (без WebSocket)")
-                while self.running:
-                    time.sleep(1)
+            self.logger.info("🎧 Запуск прослушивания WebSocket сообщений...")
+            mattermost_client.start_listening()
 
         except KeyboardInterrupt:
             self.logger.info("Получен сигнал остановки")

@@ -5,7 +5,8 @@
 import logging
 import threading
 import time
-from datetime import date, datetime
+from datetime import datetime
+from pathlib import Path
 
 import schedule
 
@@ -22,6 +23,7 @@ class StandupScheduler:
     def __init__(self):
         self.running = False
         self.scheduler_thread = None
+        self._monitoring_lock = threading.Lock()
 
     def start(self):
         """Запустить планировщик"""
@@ -30,7 +32,7 @@ class StandupScheduler:
             return
 
         # Настраиваем расписание для мониторинга проектов
-        schedule.every().day.at(config.CHECK_TIME).do(self.run_daily_monitoring)
+        schedule.every().day.at(config.CHECK_TIME).do(self._run_daily_monitoring_in_background)
 
         # Настраиваем еженедельную проверку календаря (каждый понедельник в 08:00)
         schedule.every().monday.at("08:00").do(self.check_calendar_updates)
@@ -39,6 +41,7 @@ class StandupScheduler:
         self._ensure_calendar_loaded()
 
         self.running = True
+        self._touch_heartbeat()
         self.scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
         self.scheduler_thread.start()
 
@@ -55,54 +58,62 @@ class StandupScheduler:
         while self.running:
             try:
                 schedule.run_pending()
+                self._touch_heartbeat()
                 time.sleep(60)  # Проверяем каждую минуту
             except Exception as e:
                 logger.error(f"Ошибка в планировщике: {e}")
                 time.sleep(60)
 
+    @staticmethod
+    def _touch_heartbeat():
+        """Обновить файл-признак живости (его проверяет HEALTHCHECK контейнера)"""
+        try:
+            Path(config.HEARTBEAT_FILE).touch()
+        except OSError as e:
+            logger.debug(f"Не удалось обновить heartbeat: {e}")
+
     def run_daily_monitoring(self):
-        """Выполнить ежедневный мониторинг проектов"""
+        """Выполнить ежедневный мониторинг проектов (выходные и праздники учитывает сам монитор)"""
         logger.info("Запуск ежедневного мониторинга проектов")
 
+        # Если календарь не удалось загрузить ранее, пробуем снова
+        self._ensure_calendar_loaded(current_year_only=True)
+
         try:
-            today = date.today()
-
-            # Быстрая проверка: суббота (5) или воскресенье (6) — однозначно выходной
-            if today.weekday() >= 5:
-                logger.info(
-                    f"Сегодня ({today}, {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'][today.weekday()]}) выходной день (суббота/воскресенье) - мониторинг пропущен"
-                )
-                return
-
-            # Проверяем, не является ли сегодня праздничным днем (по производственному календарю в БД)
-            if db_manager.is_holiday(today):
-                logger.info(f"Сегодня ({today}) праздничный день - мониторинг пропущен")
-                return
-
-            # Дополнительная проверка через API (на случай, если календарь не загружен)
-            if not calendar_client.is_working_day(today):
-                logger.info(f"Сегодня ({today}) нерабочий день (проверено через API) - мониторинг пропущен")
-                return
-
-            # Запускаем мониторинг всех активных проектов
-            project_monitor.monitor_all_projects()
-
-            logger.info("Ежедневный мониторинг проектов завершен")
-
+            errors = project_monitor.monitor_all_projects()
         except Exception as e:
             logger.error(f"Ошибка при выполнении мониторинга проектов: {e}")
+            errors = [f"сбой мониторинга: {e!s}"]
 
-            # Отправляем уведомление об ошибке администраторам
-            error_message = f"❌ Ошибка при мониторинге проектов: {e!s}"
+        if errors:
+            self._notify_admins_about_errors(errors)
+        else:
+            logger.info("Ежедневный мониторинг проектов завершен")
 
-            # Отправляем в основной канал если он настроен
-            if config.MATTERMOST_CHANNEL_ID:
-                mattermost_client.send_channel_message(config.MATTERMOST_CHANNEL_ID, error_message)
+    def _notify_admins_about_errors(self, errors: list[str]):
+        """Сообщить об ошибках мониторинга в основной канал и администраторам"""
+        error_message = "❌ **Ошибки при мониторинге проектов:**\n" + "\n".join(f"• {error}" for error in errors)
 
-            # Отправляем администраторам
-            for admin_email in config.ADMIN_EMAILS:
-                if admin_email.strip():
-                    mattermost_client.send_direct_message_by_email(admin_email.strip(), error_message)
+        if config.MATTERMOST_CHANNEL_ID:
+            mattermost_client.send_channel_message(config.MATTERMOST_CHANNEL_ID, error_message)
+
+        for admin_email in config.ADMIN_EMAILS:
+            if admin_email.strip():
+                mattermost_client.send_direct_message_by_email(admin_email.strip(), error_message)
+
+    def _run_daily_monitoring_in_background(self):
+        """Запуск мониторинга в отдельном потоке: долгая проверка не блокирует цикл планировщика"""
+        if not self._monitoring_lock.acquire(blocking=False):
+            logger.warning("Предыдущий мониторинг еще выполняется - запуск пропущен")
+            return
+
+        def _job():
+            try:
+                self.run_daily_monitoring()
+            finally:
+                self._monitoring_lock.release()
+
+        threading.Thread(target=_job, name="daily-monitoring", daemon=True).start()
 
     def check_calendar_updates(self):
         """Проверить наличие обновлений календаря на текущий и следующий год"""
@@ -133,13 +144,13 @@ class StandupScheduler:
         except Exception as e:
             logger.error(f"Ошибка при проверке календаря: {e}")
 
-    def _ensure_calendar_loaded(self):
-        """Убедиться, что календарь загружен для текущего и следующего года"""
+    def _ensure_calendar_loaded(self, current_year_only: bool = False):
+        """Убедиться, что календарь загружен для текущего (и следующего) года"""
         try:
             current_year = datetime.now().year
-            next_year = current_year + 1
+            years = [current_year] if current_year_only else [current_year, current_year + 1]
 
-            for year in [current_year, next_year]:
+            for year in years:
                 if not db_manager.is_calendar_loaded(year):
                     logger.info(f"Загружаем календарь на {year} год при старте")
                     self._load_calendar_for_year(year)

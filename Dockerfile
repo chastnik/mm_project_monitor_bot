@@ -1,7 +1,7 @@
 FROM python:3.15-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        fontconfig fonts-dejavu-core \
+        fontconfig fonts-dejavu-core tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -19,7 +19,8 @@ RUN useradd --system --no-create-home --shell /bin/false botuser \
 
 USER botuser
 
-HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
-    CMD python -c "import os, signal; os.kill(1, 0)" || exit 1
+# Планировщик обновляет heartbeat-файл раз в минуту; если файл не обновлялся 5 минут - процесс завис
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+    CMD python -c "import os, sys, time; from config import config; sys.exit(0 if time.time() - os.path.getmtime(config.HEARTBEAT_FILE) < 300 else 1)" || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]

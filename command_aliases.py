@@ -1,0 +1,112 @@
+"""
+Алиасы команд бота (единый источник для разбора сообщений)
+"""
+
+# Алиас (в нижнем регистре, до 3 слов) -> основная команда
+COMMAND_ALIASES = {
+    "help": "help",
+    "справка": "help",
+    "помощь": "help",
+    "хелп": "help",
+    "команды": "help",
+    "что умеешь": "help",
+    "subscribe": "subscribe",
+    "подписка": "subscribe",
+    "подпиши": "subscribe",
+    "подпиши на проект": "subscribe",
+    "проект": "subscribe",
+    "мониторить": "subscribe",
+    "отслеживать": "subscribe",
+    "unsubscribe": "unsubscribe",
+    "отписка": "unsubscribe",
+    "отпиши": "unsubscribe",
+    "отпиши от проекта": "unsubscribe",
+    "не мониторить": "unsubscribe",
+    "не отслеживать": "unsubscribe",
+    "list_subscriptions": "list_subscriptions",
+    "подписки": "list_subscriptions",
+    "список подписок": "list_subscriptions",
+    "мои подписки": "list_subscriptions",
+    "что отслеживаешь": "list_subscriptions",
+    "list_projects": "list_projects",
+    "проекты": "list_projects",
+    "список проектов": "list_projects",
+    "все проекты": "list_projects",
+    "доступные проекты": "list_projects",
+    "показать проекты": "list_projects",
+    "какие проекты": "list_projects",
+    "setup_jira": "setup_jira",
+    "login": "setup_jira",
+    "войти": "setup_jira",
+    "вход": "setup_jira",
+    "токен": "setup_jira",
+    "token": "setup_jira",
+    "настрой jira": "setup_jira",
+    "настрой подключение": "setup_jira",
+    "jira настройка": "setup_jira",
+    "настрой джира": "setup_jira",
+    "настрой джиру": "setup_jira",
+    "test_jira": "test_jira",
+    "проверь jira": "test_jira",
+    "тест jira": "test_jira",
+    "проверь подключение": "test_jira",
+    "change_password": "change_password",
+    "смени пароль": "change_password",
+    "измени пароль": "change_password",
+    "новый пароль": "change_password",
+    "logout": "logout",
+    "выйти": "logout",
+    "выход": "logout",
+    "run_subscriptions": "run_subscriptions",
+    "проверь": "run_subscriptions",
+    "проверь подписки": "run_subscriptions",
+    "запусти проверку": "run_subscriptions",
+    "мониторинг": "run_subscriptions",
+    "history": "history",
+    "история": "history",
+    "история уведомлений": "history",
+    "что было": "history",
+    "status": "status",
+    "статус": "status",
+    "как дела": "status",
+    "что происходит": "status",
+    "analytics": "analytics",
+    "аналитика": "analytics",
+    "аналитика проекта": "analytics",
+    "покажи аналитику": "analytics",
+    "графики": "analytics",
+    "график": "analytics",
+    "графики проекта": "analytics",
+    "покажи графики": "analytics",
+    "charts": "analytics",
+    "chart": "analytics",
+    "monitor_now": "monitor_now",
+    "запусти мониторинг": "monitor_now",
+    "мониторинг сейчас": "monitor_now",
+    "проверь все": "monitor_now",
+    "проверь всё": "monitor_now",
+    "all_subscriptions": "all_subscriptions",
+    "все подписки": "all_subscriptions",
+    "все подписки системы": "all_subscriptions",
+    "delete_subscription": "delete_subscription",
+    "удали подписку": "delete_subscription",
+    "удалить подписку": "delete_subscription",
+    "list_users": "list_users",
+    "пользователи": "list_users",
+    "список пользователей": "list_users",
+    "кто подключен": "list_users",
+}
+
+_MAX_ALIAS_WORDS = 3
+
+
+def resolve_command(parts: list[str]) -> tuple[str | None, list[str]]:
+    """Определить команду по началу сообщения (алиасы из 3, 2 и 1 слова).
+
+    Возвращает (основная команда или None, оставшиеся аргументы).
+    """
+    for size in range(min(_MAX_ALIAS_WORDS, len(parts)), 0, -1):
+        key = " ".join(parts[:size]).lower()
+        if key in COMMAND_ALIASES:
+            return COMMAND_ALIASES[key], parts[size:]
+    return None, parts

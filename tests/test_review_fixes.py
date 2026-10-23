@@ -141,17 +141,17 @@ class TestAnalyticsMonths(unittest.TestCase):
         fake_client.get_project_issues.return_value = ([issue], 1)
 
         captured = {}
-        real_subplots = project_analytics.plt.subplots
+        real_subplots = project_analytics.Figure.subplots
 
-        def spy_subplots(*args, **kwargs):
-            fig, axes = real_subplots(*args, **kwargs)
+        def spy_subplots(self, *args, **kwargs):
+            axes = real_subplots(self, *args, **kwargs)
             captured["axes"] = axes
-            return fig, axes
+            return axes
 
         with (
             tempfile.TemporaryDirectory() as out_dir,
             patch.object(project_analytics.config, "ARTIFACTS_DIR", out_dir, create=True),
-            patch.object(project_analytics.plt, "subplots", side_effect=spy_subplots),
+            patch.object(project_analytics.Figure, "subplots", spy_subplots),
             # Модуль мог быть импортирован другим тестом раньше - подменяем клиент Jira напрямую
             patch.object(project_analytics, "user_jira_client", fake_client),
         ):

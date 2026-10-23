@@ -6,12 +6,10 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-import matplotlib
-
-matplotlib.use("Agg")  # Рендер без X-сервера
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 from config import config
+from jira_constants import CLOSED_STATUSES
 from user_jira_client import user_jira_client
 
 logger = logging.getLogger(__name__)
@@ -24,6 +22,18 @@ class ProjectAnalytics:
     def __init__(self):
         pass
 
+    @staticmethod
+    def _first_closed_date(issue, closed_statuses) -> datetime | None:
+        """Дата первого перевода задачи в закрытый статус по истории изменений"""
+        changelog = getattr(issue, "changelog", None)
+        if not changelog:
+            return None
+        for history in changelog.histories:
+            for item in history.items:
+                if item.field == "status" and item.toString in closed_statuses:
+                    return datetime.strptime(history.created[:10], "%Y-%m-%d")
+        return None
+
     def build_project_analytics(self, user_email: str, project_key: str) -> tuple[str, str | None]:
         """Собрать текстовый отчет и сгенерировать .jpg с графиками"""
         result = user_jira_client.get_project_issues(user_email, project_key, max_results=MAX_ANALYTICS_ISSUES)
@@ -33,17 +43,7 @@ class ProjectAnalytics:
 
         # Метрики
         total = len(issues)
-        closed_statuses = [
-            "Done",
-            "Closed",
-            "Resolved",
-            "Выполнено",
-            "Закрыто",
-            "Готово",
-            "Отменено",
-            "Отклонено",
-            "Отложено",
-        ]
+        closed_statuses = CLOSED_STATUSES
         closed = 0
         overdue_count = 0
         over_estimate_count = 0
@@ -79,11 +79,9 @@ class ProjectAnalytics:
             if is_closed:
                 closed += 1
             # Исполнители: считаем всего и активные
-            assignee_name = None
+            assignee_name = "Не назначен"
             if getattr(fields, "assignee", None):
                 assignee_name = getattr(fields.assignee, "displayName", None) or "Не назначен"
-            else:
-                assignee_name = "Не назначен"
             assignee_total[assignee_name] = assignee_total.get(assignee_name, 0) + 1
             if not is_closed:
                 assignee_open[assignee_name] = assignee_open.get(assignee_name, 0) + 1
@@ -100,17 +98,10 @@ class ProjectAnalytics:
                 points_y.append(spent)
                 if spent > orig:
                     over_estimate_count += 1
-                    assignee_name = None
-                    if getattr(fields, "assignee", None):
-                        assignee_name = getattr(fields.assignee, "displayName", None) or "Не назначен"
-                    over_by_user[assignee_name or "Не назначен"] = (
-                        over_by_user.get(assignee_name or "Не назначен", 0) + 1
-                    )
+                    over_by_user[assignee_name] = over_by_user.get(assignee_name, 0) + 1
                     if not is_closed:
                         open_over_estimate_count += 1
-                        open_over_by_user[assignee_name or "Не назначен"] = (
-                            open_over_by_user.get(assignee_name or "Не назначен", 0) + 1
-                        )
+                        open_over_by_user[assignee_name] = open_over_by_user.get(assignee_name, 0) + 1
 
             # Просрочки
             due_date = getattr(fields, "duedate", None)
@@ -119,18 +110,11 @@ class ProjectAnalytics:
                     due_dt = datetime.strptime(due_date, "%Y-%m-%d")
                     if due_dt <= today:
                         overdue_count += 1
-                        assignee_name = None
-                        if getattr(fields, "assignee", None):
-                            assignee_name = getattr(fields.assignee, "displayName", None) or "Не назначен"
-                        overdue_by_user[assignee_name or "Не назначен"] = (
-                            overdue_by_user.get(assignee_name or "Не назначен", 0) + 1
-                        )
+                        overdue_by_user[assignee_name] = overdue_by_user.get(assignee_name, 0) + 1
                         open_overdue_count += 1
-                        open_overdue_by_user[assignee_name or "Не назначен"] = (
-                            open_overdue_by_user.get(assignee_name or "Не назначен", 0) + 1
-                        )
-                except Exception:
-                    pass
+                        open_overdue_by_user[assignee_name] = open_overdue_by_user.get(assignee_name, 0) + 1
+                except ValueError:
+                    logger.debug(f"Некорректный срок выполнения у {issue.key}: {due_date!r}")
 
             # Created/Closed per month (последние 6 мес)
             try:
@@ -140,25 +124,17 @@ class ProjectAnalytics:
                     if created_dt >= six_months_ago:
                         key = created_dt.strftime("%Y-%m")
                         created_per_month[key] = created_per_month.get(key, 0) + 1
-            except Exception:
-                pass
+            except ValueError:
+                logger.debug(f"Некорректная дата создания у {issue.key}")
 
-            # Определяем дату закрытия из changelog
+            # Определяем дату закрытия из changelog (берем только первое закрытие)
             try:
-                if hasattr(issue, "changelog") and issue.changelog:
-                    for history in issue.changelog.histories:
-                        for item in history.items:
-                            if item.field == "status" and item.toString in closed_statuses:
-                                closed_dt = datetime.strptime(history.created[:10], "%Y-%m-%d")
-                                if closed_dt >= six_months_ago:
-                                    key = closed_dt.strftime("%Y-%m")
-                                    closed_per_month[key] = closed_per_month.get(key, 0) + 1
-                                # берем только первое закрытие
-                                raise StopIteration
-            except StopIteration:
-                pass
-            except Exception:
-                pass
+                closed_on = self._first_closed_date(issue, closed_statuses)
+                if closed_on and closed_on >= six_months_ago:
+                    key = closed_on.strftime("%Y-%m")
+                    closed_per_month[key] = closed_per_month.get(key, 0) + 1
+            except ValueError:
+                logger.debug(f"Некорректная дата в истории изменений {issue.key}")
 
         open_ = total - closed
 
@@ -217,7 +193,8 @@ class ProjectAnalytics:
         # Рисуем графики: scatter и created vs closed за 6 мес
         image_path = None
         try:
-            fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+            fig = Figure(figsize=(16, 5))  # объектный API без pyplot: потокобезопасно
+            axes = fig.subplots(1, 3)
 
             # Scatter: оценка vs факт
             axes[0].scatter(points_x, points_y, alpha=0.6, s=20)
@@ -258,13 +235,12 @@ class ProjectAnalytics:
                 axes[2].text(0.5, 0.5, "Нет данных по типам", ha="center", va="center")
                 axes[2].set_axis_off()
 
-            plt.tight_layout()
+            fig.tight_layout()
 
-            out_dir = getattr(config, "ARTIFACTS_DIR", "/tmp")
+            out_dir = config.ARTIFACTS_DIR
             os.makedirs(out_dir, exist_ok=True)
             image_path = os.path.join(out_dir, f"{project_key}_analytics_{int(datetime.now().timestamp())}.jpg")
             fig.savefig(image_path, format="jpg", dpi=150)
-            plt.close(fig)
         except Exception as e:
             logger.error(f"Ошибка построения графиков: {e}")
 
