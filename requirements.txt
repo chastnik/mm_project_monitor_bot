@@ -4,7 +4,7 @@ schedule>=1.2.2
 python-dotenv>=1.2.4
 cryptography>=50.0.2
 jira>=3.10.5
-websockets>=17.2
+websockets>=17.4
 
 # Для аналитики и построения графиков
 matplotlib>=3.11.2
